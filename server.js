@@ -26,6 +26,19 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
 
+// ---- Ensure MongoDB is connected before handling any request ----
+// Needed for serverless platforms like Vercel, where each cold start is a
+// fresh process — connectDB() is cheap to call repeatedly since it's
+// cached/idempotent (see config/db.js), so this is a no-op once warm.
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    res.status(503).json({ success: false, message: "Database connection failed.", error: error.message });
+  }
+});
+
 // ---- Health check ----
 app.get("/api/health", (req, res) => {
   res.status(200).json({ success: true, message: "AgriLink AI 2.0 backend is running." });
@@ -57,10 +70,21 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 
-connectDB().then(() => {
-  app.listen(PORT, () => {
-    console.log(`AgriLink AI 2.0 backend listening on port ${PORT}`);
-  });
-});
+// Vercel (and similar serverless platforms) import `app` directly and
+// manage the HTTP server themselves — calling app.listen() there would be
+// harmless but pointless. On a traditional host (Render, your own PC),
+// process.env.VERCEL is never set, so this runs normally.
+if (!process.env.VERCEL) {
+  connectDB()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`AgriLink AI 2.0 backend listening on port ${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error("Failed to start server:", error.message);
+      process.exit(1);
+    });
+}
 
 module.exports = app;
