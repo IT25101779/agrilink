@@ -16,6 +16,7 @@ const crowdfundingRoutes = require("./routes/crowdfunding");
 const chatRoutes = require("./routes/chat");
 const reminderRoutes = require("./routes/reminders");
 const supplierRoutes = require("./routes/suppliers");
+const timelineRoutes = require("./routes/timelines");
 
 const app = express();
 
@@ -56,6 +57,7 @@ app.use("/api/crowdfunding", crowdfundingRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/reminders", reminderRoutes);
 app.use("/api/suppliers", supplierRoutes);
+app.use("/api/timelines", timelineRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {
