@@ -29,15 +29,80 @@ function buildSystemPrompt(language, timelineContext) {
 Context about this farmer's current situation:
 ${contextBlock}
 
-Use this context to make your advice specific to their actual crop and current growth stage whenever relevant. If asked something unrelated to farming, gently redirect to how you can help with their crops, weather, market prices, or pest/disease issues. Keep responses concise — 3-5 sentences unless the farmer asks for a detailed explanation.`;
+Use this context to make your advice specific to their actual crop and current growth stage whenever relevant. If asked something unrelated to farming, gently redirect to how you can help with their crops, weather, market prices, or pest/disease issues. Keep responses concise — 3-5 sentences unless the farmer asks for a detailed explanation.
+
+You may be replying over WhatsApp or inside the AgriLink AI app — keep formatting plain (no markdown headers or tables), since WhatsApp displays raw text.`;
+}
+
+/**
+ * Core assistant call shared by every channel (mobile app chat screen,
+ * WhatsApp webhook, and anything else added later). Sends the farmer's
+ * message to Claude with their current timeline injected into the system
+ * prompt, stores both sides of the exchange, and returns the reply text.
+ *
+ * Throws on failure — callers decide how to surface that per-channel
+ * (an HTTP error response for the app, a fallback WhatsApp message for
+ * the webhook).
+ */
+async function getAssistantReply({ farmerId, message, language }) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY is not configured on the server.");
+  }
+
+  const chatLanguage = language || "en";
+
+  const timelineContext = await CultivationTimeline.findOne({ farmer: farmerId, status: "active" }).sort({ updatedAt: -1 });
+
+  const recentHistory = await ChatMessage.find({ farmer: farmerId })
+    .sort({ createdAt: -1 })
+    .limit(HISTORY_MESSAGES_LIMIT)
+    .then((docs) => docs.reverse());
+
+  const anthropicMessages = [
+    ...recentHistory.map((m) => ({ role: m.role, content: m.content })),
+    { role: "user", content: message },
+  ];
+
+  const claudeResponse = await fetch(ANTHROPIC_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 500,
+      system: buildSystemPrompt(chatLanguage, timelineContext),
+      messages: anthropicMessages,
+    }),
+  });
+
+  if (!claudeResponse.ok) {
+    const errorText = await claudeResponse.text();
+    console.error("Anthropic API error:", claudeResponse.status, errorText);
+    throw new Error("Chat assistant is temporarily unavailable.");
+  }
+
+  const claudeData = await claudeResponse.json();
+  const replyText = claudeData.content?.find((block) => block.type === "text")?.text || "";
+
+  await ChatMessage.create({ farmer: farmerId, role: "user", content: message, language: chatLanguage });
+  const assistantMessage = await ChatMessage.create({
+    farmer: farmerId,
+    role: "assistant",
+    content: replyText,
+    language: chatLanguage,
+  });
+
+  return { reply: replyText, messageId: assistantMessage._id, hadTimelineContext: !!timelineContext };
 }
 
 /**
  * POST /api/chat/message
  * Body: { farmer, message, language }
- * Sends the farmer's message to Claude with their current timeline context
- * injected into the system prompt, stores both sides of the exchange, and
- * returns the assistant's reply.
+ * HTTP entrypoint for the mobile app's chat screen — thin wrapper around
+ * getAssistantReply().
  */
 async function sendMessage(req, res) {
   try {
@@ -47,73 +112,13 @@ async function sendMessage(req, res) {
       return res.status(400).json({ success: false, message: "farmer and message are required." });
     }
 
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        message: "ANTHROPIC_API_KEY is not configured on the server. Add it to your .env file.",
-      });
-    }
+    const result = await getAssistantReply({ farmerId: farmer, message, language });
 
-    const chatLanguage = language || "en";
-
-    // Pull the farmer's most recently updated active timeline for context.
-    // Gracefully returns null if none exists yet — the assistant still works,
-    // just without crop-specific personalization until one is synced.
-    const timelineContext = await CultivationTimeline.findOne({ farmer, status: "active" }).sort({ updatedAt: -1 });
-
-    const recentHistory = await ChatMessage.find({ farmer })
-      .sort({ createdAt: -1 })
-      .limit(HISTORY_MESSAGES_LIMIT)
-      .then((docs) => docs.reverse());
-
-    const anthropicMessages = [
-      ...recentHistory.map((m) => ({ role: m.role, content: m.content })),
-      { role: "user", content: message },
-    ];
-
-    const claudeResponse = await fetch(ANTHROPIC_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 500,
-        system: buildSystemPrompt(chatLanguage, timelineContext),
-        messages: anthropicMessages,
-      }),
-    });
-
-    if (!claudeResponse.ok) {
-      const errorText = await claudeResponse.text();
-      console.error("Anthropic API error:", claudeResponse.status, errorText);
-      return res.status(502).json({ success: false, message: "Chat assistant is temporarily unavailable.", details: errorText });
-    }
-
-    const claudeData = await claudeResponse.json();
-    const replyText = claudeData.content?.find((block) => block.type === "text")?.text || "";
-
-    await ChatMessage.create({ farmer, role: "user", content: message, language: chatLanguage });
-    const assistantMessage = await ChatMessage.create({
-      farmer,
-      role: "assistant",
-      content: replyText,
-      language: chatLanguage,
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        reply: replyText,
-        messageId: assistantMessage._id,
-        hadTimelineContext: !!timelineContext,
-      },
-    });
+    return res.status(200).json({ success: true, data: result });
   } catch (error) {
     console.error("sendMessage error:", error);
-    return res.status(500).json({ success: false, message: "Failed to process chat message.", error: error.message });
+    const status = error.message.includes("not configured") ? 500 : 502;
+    return res.status(status).json({ success: false, message: error.message || "Failed to process chat message." });
   }
 }
 
@@ -134,4 +139,4 @@ async function getHistory(req, res) {
   }
 }
 
-module.exports = { sendMessage, getHistory };
+module.exports = { sendMessage, getHistory, getAssistantReply };

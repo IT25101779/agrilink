@@ -49,6 +49,12 @@ const MarketplaceListingSchema = new mongoose.Schema(
       default: "listed",
     },
     orderedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // Set when completeSale() transitions a reserved listing to "sold" —
+    // this is what the AI price prediction engine's historical-average
+    // lookup and the admin dashboard's Gross Marketplace Value metric
+    // both key off. See marketplaceController.completeSale for why this
+    // field needed to exist at all.
+    soldAt: { type: Date },
   },
   { timestamps: true }
 );

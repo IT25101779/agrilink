@@ -1,4 +1,5 @@
 const DiseaseLog = require("../models/DiseaseLog");
+const { translateFields } = require("../utils/translateText");
 
 const KINDWISE_ENDPOINT = "https://crop.kindwise.com/api/v1/identification";
 const OUTBREAK_RADIUS_METERS = 10000; // 10km cluster radius
@@ -7,7 +8,7 @@ const OUTBREAK_THRESHOLD_COUNT = 5; // number of matching logs in cluster to dec
 
 /**
  * POST /api/disease/scan
- * Body: { farmer, timelineRef, cropType, imageBase64, latitude, longitude, district }
+ * Body: { farmer, timelineRef, cropType, imageBase64, latitude, longitude, district, language? }
  *
  * imageBase64 should be a data URI, e.g. "data:image/jpeg;base64,/9j/4AAQ..."
  *
@@ -17,10 +18,20 @@ const OUTBREAK_THRESHOLD_COUNT = 5; // number of matching logs in cluster to dec
  * last 21 days, every log in that cluster is flagged as part of an active
  * outbreak and the response includes an outbreak alert for the frontend
  * to broadcast to nearby farmers.
+ *
+ * LANGUAGE HANDLING: Kindwise only returns English text, and there's no
+ * language parameter it accepts. If `language` is "si" or "ta", the
+ * response (not the database record) is translated via Claude before
+ * being sent back — see utils/translateText.js. Everything written to
+ * DiseaseLog, and the outbreak-cluster matching query (which matches on
+ * an exact detectedDisease string), always uses the original English
+ * text, so translation never affects outbreak detection accuracy or
+ * causes the same disease to be tracked as two different clusters in
+ * two languages.
  */
 async function scanCropImage(req, res) {
   try {
-    const { farmer, timelineRef, cropType, imageBase64, latitude, longitude, district } = req.body;
+    const { farmer, timelineRef, cropType, imageBase64, latitude, longitude, district, language } = req.body;
 
     if (!farmer || !cropType || !imageBase64 || latitude === undefined || longitude === undefined) {
       return res.status(400).json({
@@ -79,8 +90,10 @@ async function scanCropImage(req, res) {
     const detectedDisease = topMatch.name;
     const confidenceScore = topMatch.probability;
     const treatment = topMatch.details?.treatment || null;
+    const severity = topMatch.details?.severity || null;
+    const symptoms = topMatch.details?.symptoms || null;
 
-    // ---- Log this scan ----
+    // ---- Log this scan (always in English — this is the canonical record) ----
     const diseaseLog = await DiseaseLog.create({
       farmer,
       timelineRef,
@@ -93,7 +106,7 @@ async function scanCropImage(req, res) {
       recommendedTreatment: treatment ? JSON.stringify(treatment) : null,
     });
 
-    // ---- Regional outbreak cluster check ----
+    // ---- Regional outbreak cluster check (English-only matching, unaffected by translation) ----
     const since = new Date();
     since.setDate(since.getDate() - OUTBREAK_LOOKBACK_DAYS);
 
@@ -125,16 +138,62 @@ async function scanCropImage(req, res) {
       };
     }
 
+    // ---- Translate the OUTGOING response only, if requested ----
+    let responseDiseaseName = detectedDisease;
+    let responseSeverity = severity;
+    let responseSymptoms = symptoms;
+    let responseTreatment = treatment;
+    let responseOutbreakAlert = outbreakAlert;
+
+    if (language && language !== "en") {
+      const flatPayload = { detectedDisease };
+      if (typeof severity === "string") flatPayload.severity = severity;
+      if (typeof symptoms === "string") flatPayload.symptoms = symptoms;
+      if (typeof treatment === "string") flatPayload.treatment = treatment;
+      if (outbreakAlert) flatPayload.outbreakMessage = outbreakAlert.message;
+
+      // If treatment is a structured object (Kindwise commonly returns
+      // {biological, chemical, prevention} style keys), translate each
+      // string-valued field individually, prefixed so it round-trips
+      // back to the right place in the object below.
+      const treatmentIsObject = treatment && typeof treatment === "object";
+      if (treatmentIsObject) {
+        for (const [key, value] of Object.entries(treatment)) {
+          if (typeof value === "string") flatPayload[`treatment__${key}`] = value;
+        }
+      }
+
+      const translated = await translateFields(flatPayload, language);
+
+      responseDiseaseName = translated.detectedDisease || detectedDisease;
+      if (flatPayload.severity) responseSeverity = translated.severity;
+      if (flatPayload.symptoms) responseSymptoms = translated.symptoms;
+      if (flatPayload.treatment) responseTreatment = translated.treatment;
+      if (treatmentIsObject) {
+        responseTreatment = { ...treatment };
+        for (const key of Object.keys(flatPayload)) {
+          if (key.startsWith("treatment__")) {
+            const originalKey = key.replace("treatment__", "");
+            responseTreatment[originalKey] = translated[key] || treatment[originalKey];
+          }
+        }
+      }
+      if (outbreakAlert) {
+        responseOutbreakAlert = { ...outbreakAlert, message: translated.outbreakMessage || outbreakAlert.message };
+      }
+    }
+
     return res.status(201).json({
       success: true,
       data: {
         diseaseLogId: diseaseLog._id,
-        detectedDisease,
+        detectedDisease: responseDiseaseName,
+        detectedDiseaseEnglish: detectedDisease, // kept for any client-side logic that needs the canonical name
         confidenceScore,
-        severity: topMatch.details?.severity || null,
-        symptoms: topMatch.details?.symptoms || null,
-        treatment,
-        outbreakAlert,
+        severity: responseSeverity,
+        symptoms: responseSymptoms,
+        treatment: responseTreatment,
+        outbreakAlert: responseOutbreakAlert,
       },
     });
   } catch (error) {

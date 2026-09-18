@@ -32,7 +32,11 @@ function getCalendarMultiplier(targetDate) {
 }
 
 /**
- * Pulls historical sold-price average for a crop over the last N days.
+ * Pulls historical SOLD-price average for a crop over the last N days.
+ * This is the strongest signal (real completed transactions), but is
+ * only populated once completeSale() has actually been called on some
+ * listings — see marketplaceController.completeSale for why that
+ * transition didn't exist until recently.
  */
 async function getHistoricalAveragePrice(cropType, lookbackDays = 90) {
   const sinceDate = new Date();
@@ -59,6 +63,39 @@ async function getHistoricalAveragePrice(cropType, lookbackDays = 90) {
 
   if (result.length === 0) {
     return { avgPrice: null, minPrice: null, maxPrice: null, sampleSize: 0 };
+  }
+  return result[0];
+}
+
+/**
+ * Fallback signal for when there isn't enough (or any) sold-price history
+ * yet — averages what farmers are CURRENTLY asking for the crop across
+ * any active listing (primary tier, not-yet-rejected, so secondary-market
+ * markdowns don't drag this down). This is a weaker signal than real
+ * sales, but a genuinely crop-specific average of asking prices is a much
+ * better cold-start estimate than a single flat number for every crop in
+ * the catalogue.
+ */
+async function getListedAveragePrice(cropType) {
+  const result = await MarketplaceListing.aggregate([
+    {
+      $match: {
+        cropType: cropType,
+        tier: "primary",
+        status: { $in: ["listed", "reserved"] },
+      },
+    },
+    {
+      $group: {
+        _id: "$cropType",
+        avgPrice: { $avg: "$originalPricePerKg" },
+        sampleSize: { $sum: 1 },
+      },
+    },
+  ]);
+
+  if (result.length === 0) {
+    return { avgPrice: null, sampleSize: 0 };
   }
   return result[0];
 }
@@ -136,10 +173,20 @@ async function getDiseasePressureMultiplier(cropType) {
  * MAIN AGGREGATION ROUTINE
  * Combines: historical baseline, calendar demand, regional shortage,
  * weather disruption, and disease pressure into one weighted prediction.
+ *
+ * Baseline price resolution order (this is the fix for the "always ~100"
+ * bug): real sold-price average, when it exists -> average of what's
+ * currently being asked for the crop, when any listings exist -> a flat
+ * LKR 100 fallback, only as an absolute last resort for a crop with zero
+ * listings of any kind in the system yet. `confidence` reflects which
+ * tier the baseline actually came from, not just sample size, so the
+ * client can honestly show "low confidence" when this is asking-price-
+ * based rather than real-sale-based.
  */
 async function predictPrice({ cropType, targetDate = new Date(), weatherSummary = null }) {
-  const [historical, shortage, disease] = await Promise.all([
+  const [historical, listedFallback, shortage, disease] = await Promise.all([
     getHistoricalAveragePrice(cropType),
+    getListedAveragePrice(cropType),
     getRegionalShortageFactor(cropType),
     getDiseasePressureMultiplier(cropType),
   ]);
@@ -147,8 +194,18 @@ async function predictPrice({ cropType, targetDate = new Date(), weatherSummary 
   const calendar = getCalendarMultiplier(new Date(targetDate));
   const weather = getWeatherDisruptionMultiplier(weatherSummary);
 
-  // Fallback baseline if no historical sales exist yet for this crop.
-  const baselinePrice = historical.avgPrice !== null ? historical.avgPrice : 100;
+  let baselinePrice;
+  let baselineSource;
+  if (historical.avgPrice !== null) {
+    baselinePrice = historical.avgPrice;
+    baselineSource = "sold_history";
+  } else if (listedFallback.avgPrice !== null) {
+    baselinePrice = listedFallback.avgPrice;
+    baselineSource = "current_asking_prices";
+  } else {
+    baselinePrice = 100;
+    baselineSource = "no_data_flat_default";
+  }
 
   // Weighted composite: each factor nudges the baseline. Weights sum to 1.0
   // across the four adjustment factors, applied multiplicatively for compounding effects.
@@ -161,10 +218,16 @@ async function predictPrice({ cropType, targetDate = new Date(), weatherSummary 
 
   const predictedPrice = Math.round(baselinePrice * compositeMultiplier * 100) / 100;
 
-  // Confidence scales with historical sample size — more data, more trust.
+  // Confidence now reflects the baseline source first, sample size second
+  // — a large sample of asking prices is still a weaker signal than a
+  // handful of real sales, and the client-facing label should say so.
   let confidence = "low";
-  if (historical.sampleSize >= 30) confidence = "high";
-  else if (historical.sampleSize >= 10) confidence = "medium";
+  if (baselineSource === "sold_history") {
+    if (historical.sampleSize >= 30) confidence = "high";
+    else if (historical.sampleSize >= 10) confidence = "medium";
+  } else if (baselineSource === "current_asking_prices" && listedFallback.sampleSize >= 5) {
+    confidence = "medium";
+  }
 
   return {
     cropType,
@@ -172,8 +235,10 @@ async function predictPrice({ cropType, targetDate = new Date(), weatherSummary 
     predictedPricePerKg: predictedPrice,
     confidence,
     baselinePrice,
+    baselineSource,
     factors: {
       historical,
+      listedFallback,
       calendarEvent: calendar.matchedEvent,
       calendarMultiplier: calendar.multiplier,
       shortage,
@@ -187,6 +252,7 @@ async function predictPrice({ cropType, targetDate = new Date(), weatherSummary 
 module.exports = {
   predictPrice,
   getHistoricalAveragePrice,
+  getListedAveragePrice,
   getRegionalShortageFactor,
   getWeatherDisruptionMultiplier,
   getDiseasePressureMultiplier,

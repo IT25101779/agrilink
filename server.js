@@ -17,11 +17,13 @@ const chatRoutes = require("./routes/chat");
 const reminderRoutes = require("./routes/reminders");
 const supplierRoutes = require("./routes/suppliers");
 const timelineRoutes = require("./routes/timelines");
+// const whatsappRoutes = require("./routes/whatsapp");
+const communityListingRoutes = require("./routes/communityListings");
 
 const app = express();
 
 // ---- Core middleware ----
-app.use(helmet());
+// app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -58,6 +60,8 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/reminders", reminderRoutes);
 app.use("/api/suppliers", supplierRoutes);
 app.use("/api/timelines", timelineRoutes);
+app.use("/api/whatsapp", whatsappRoutes);
+app.use("/api/community-listings", communityListingRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {
