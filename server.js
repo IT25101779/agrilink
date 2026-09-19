@@ -23,6 +23,7 @@ const insightsRoutes = require("./routes/insights");
 const passportRoutes = require("./routes/passport");
 const groupLotRoutes = require("./routes/groupLots");
 const demandRoutes = require("./routes/demand");
+const groupChatRoutes = require("./routes/groupChat");
 
 const app = express();
 
@@ -70,6 +71,7 @@ app.use("/api/insights", insightsRoutes);
 app.use("/api/passport", passportRoutes);
 app.use("/api/group-lots", groupLotRoutes);
 app.use("/api/demand", demandRoutes);
+app.use("/api/group-chat", groupChatRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {

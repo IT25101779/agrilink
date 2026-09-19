@@ -55,6 +55,8 @@ const UserSchema = new mongoose.Schema(
     // Random code that makes up the shareable Farm Passport link/QR. Rotating
     // it (a new random value) instantly kills any link that was shared before.
     passportToken: { type: String, unique: true, sparse: true, select: false },
+    // Set by an admin to stop someone posting in group chats until this date.
+    chatBannedUntil: { type: Date },
   },
   { timestamps: true }
 );

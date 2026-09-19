@@ -20,6 +20,8 @@
  *   - Produce rescued from waste (rejected, then sold on the flash-sale
  *     market), one completed group sale and one fulfilled buyer request, so
  *     the admin IMPACT DASHBOARD has real numbers to add up
+ *   - GROUP CHAT conversations in English, Sinhala and Tamil (a Tomato group,
+ *     a Kandy group and an "All farmers" group) so the chat is alive on day one
  *   - A demo farmer whose account is 120 days old, so the LOAN READINESS
  *     checklist shows 7 of 8 checks (the last one, a group sale, is what you
  *     complete live in the demo)
@@ -45,6 +47,11 @@ const CultivationTimeline = require("../models/CultivationTimeline");
 const GroupLot = require("../models/GroupLot");
 const DemandRequest = require("../models/DemandRequest");
 const Reminder = require("../models/Reminder");
+const GroupMembership = require("../models/GroupMembership");
+const GroupMessage = require("../models/GroupMessage");
+const ChatMedia = require("../models/ChatMedia");
+const ChatReport = require("../models/ChatReport");
+const { makeAlias } = require("../utils/chatConfig");
 
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || "Demo@1234";
 const FARMER_EMAIL = "demo.farmer@agrilink.lk";
@@ -96,6 +103,11 @@ async function main() {
     await GroupLot.deleteMany({ createdBy: { $in: previousIds } });
     await DemandRequest.deleteMany({ buyer: { $in: previousIds } });
     await Reminder.deleteMany({ farmer: { $in: previousIds } });
+    await GroupMembership.deleteMany({ user: { $in: previousIds } });
+    await GroupMessage.deleteMany({ sender: { $in: previousIds } });
+    await GroupMessage.deleteMany({ type: "system" }); // outbreak alerts from earlier demos
+    await ChatMedia.deleteMany({ uploader: { $in: previousIds } });
+    await ChatReport.deleteMany({ reporter: { $in: previousIds } });
     await User.deleteMany({ _id: { $in: previousIds } });
     console.log("Removed previous demo data.");
   }
@@ -412,6 +424,35 @@ async function main() {
     pledges: [{ investor: buyer._id, amountLkr: 40000, expectedReturnLkr: 44000, status: "repaid", pledgedAt: daysAgo(90) }],
   });
   console.log("Created 3 crowdfunding campaigns.");
+
+  // ---- 10. Group chat conversations (three neighbours who are NOT used in the automated tests) ----
+  const chatters = { n5: n(5), n7: n(7), n8: n(8) };
+  const memberOf = async (farmerDoc, groupKey) => {
+    const identity = makeAlias(farmerDoc._id, groupKey);
+    await GroupMembership.create({ user: farmerDoc._id, groupKey, alias: identity.alias, avatarHue: identity.avatarHue, avatarEmoji: identity.avatarEmoji, joinedAt: daysAgo(3), lastReadAt: daysAgo(3) });
+    return identity;
+  };
+  const say = async (farmerDoc, groupKey, text, minutesAgo, extra = {}) => {
+    const identity = makeAlias(farmerDoc._id, groupKey);
+    return GroupMessage.create({ groupKey, sender: farmerDoc._id, alias: identity.alias, avatarHue: identity.avatarHue, avatarEmoji: identity.avatarEmoji, type: "text", text, createdAt: new Date(Date.now() - minutesAgo * 60000), updatedAt: new Date(Date.now() - minutesAgo * 60000), ...extra });
+  };
+
+  await Promise.all([memberOf(chatters.n5, "crop:Tomato"), memberOf(chatters.n7, "crop:Tomato")]);
+  const q = await say(chatters.n5, "crop:Tomato", "Anyone seeing yellow spots on tomato leaves after the rain? It started 3 days ago.", 300);
+  const a1 = await say(chatters.n7, "crop:Tomato", "Yes, same here. I think it is Late Blight. I sprayed a copper fungicide yesterday.", 285, { replyTo: q._id, replyPreview: { alias: makeAlias(chatters.n5._id, "crop:Tomato").alias, kind: "text", text: q.text.slice(0, 80) } });
+  const a2 = await say(chatters.n5, "crop:Tomato", "How many times did you spray?", 270);
+  await say(chatters.n7, "crop:Tomato", "Twice, 5 days apart. Remove the badly infected leaves first and don't water from above.", 255, { replyTo: a2._id, replyPreview: { alias: makeAlias(chatters.n5._id, "crop:Tomato").alias, kind: "text", text: a2.text.slice(0, 80) } });
+  await GroupMessage.updateOne({ _id: a1._id }, { $set: { helpfulBy: [chatters.n5._id, chatters.n8._id] } });
+
+  await Promise.all([memberOf(chatters.n5, "district:Kandy"), memberOf(chatters.n7, "district:Kandy"), memberOf(chatters.n8, "district:Kandy")]);
+  await say(chatters.n8, "district:Kandy", "අද කොළඹ යන ට්‍රක් එකක් තියෙනවද? තක්කාලි කිලෝ 200ක් යවන්න ඕනේ.", 200);
+  await say(chatters.n5, "district:Kandy", "පේරාදෙණිය හන්දියෙන් හෙට උදේ 6ට ට්‍රක් එකක් යනවා. ඔයාට ඉඩ තියෙනවා.", 190);
+  await say(chatters.n7, "district:Kandy", "Prices at Dambulla today: tomato Rs. 170, beans Rs. 350, carrot Rs. 240.", 90);
+
+  await Promise.all([memberOf(chatters.n7, "all"), memberOf(chatters.n8, "all")]);
+  await say(chatters.n7, "all", "நல்ல மழை பெய்தது. எல்லோரும் உங்கள் பயிர்களை பாதுகாக்கவும்.", 60);
+  await say(chatters.n8, "all", "Thanks for the reminder! Stay safe everyone.", 45);
+  console.log("Created group chat conversations (English, Sinhala, Tamil).");
 
   console.log("\nDONE. Demo logins:");
   console.log(`  Farmer : ${FARMER_EMAIL} / ${DEMO_PASSWORD}`);

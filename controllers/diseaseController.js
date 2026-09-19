@@ -174,6 +174,15 @@ async function scanCropImage(req, res) {
       };
     }
 
+    // Tell the matching crop + district chat group (best effort — a chat problem must never break a scan).
+    if (outbreakAlert) {
+      try {
+        await require("./groupChatController").postOutbreakAlert({ farmerId: farmer, cropType, disease: detectedDisease, count: nearbyMatches.length });
+      } catch (chatError) {
+        console.error("outbreak chat alert failed:", chatError.message);
+      }
+    }
+
     // ---- Translate the OUTGOING response only, if requested ----
     let responseDiseaseName = detectedDisease;
     let responseSeverity = severity;
