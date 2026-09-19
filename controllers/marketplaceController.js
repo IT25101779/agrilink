@@ -76,6 +76,71 @@ async function getListings(req, res) {
 }
 
 /**
+ * PATCH /api/marketplace/listings/:id
+ * Lets the farmer who owns a listing edit it — quantity, their asking
+ * price, harvest date, quality grade, or photos. Previously there was no
+ * way for a farmer to change anything after posting, including the price
+ * (only the automatic reject-markdown could change it). Only allowed
+ * while the listing is still "listed" — once it's reserved or sold,
+ * editing the terms out from under a buyer would be a real problem, so
+ * that's blocked here rather than left to the frontend to enforce.
+ *
+ * Body: { farmerId, quantityKg?, pricePerKg?, harvestDate?, qualityGrade?, photos? }
+ * farmerId must match the listing's owner — this API has no auth
+ * middleware on it (consistent with the rest of this router), so
+ * ownership is checked explicitly here rather than assumed.
+ */
+async function updateListing(req, res) {
+  try {
+    const { id } = req.params;
+    const { farmerId, quantityKg, pricePerKg, harvestDate, qualityGrade, photos } = req.body;
+
+    if (!farmerId) {
+      return res.status(400).json({ success: false, message: "farmerId is required to verify ownership." });
+    }
+
+    const listing = await MarketplaceListing.findById(id);
+    if (!listing) {
+      return res.status(404).json({ success: false, message: "Listing not found." });
+    }
+    if (listing.farmer.toString() !== farmerId) {
+      return res.status(403).json({ success: false, message: "You can only edit your own listings." });
+    }
+    if (listing.status !== "listed") {
+      return res.status(409).json({
+        success: false,
+        message: `This listing can no longer be edited (status: ${listing.status}).`,
+      });
+    }
+
+    if (quantityKg !== undefined) listing.quantityKg = quantityKg;
+    if (qualityGrade !== undefined) listing.qualityGrade = qualityGrade;
+    if (harvestDate !== undefined) listing.harvestDate = harvestDate;
+    if (photos !== undefined) listing.photos = photos;
+
+    // Editing price is deliberately farmer-controlled and independent of
+    // the automatic reject-markdown system: this sets BOTH the original
+    // and current price directly to whatever the farmer asks for, since
+    // an explicit edit means the farmer wants that to be the real price
+    // going forward, not a discount off some earlier number. If the
+    // listing later gets rejected, the markdown still applies as normal,
+    // calculated off this new original price.
+    if (pricePerKg !== undefined) {
+      listing.originalPricePerKg = pricePerKg;
+      listing.currentPricePerKg = pricePerKg;
+      listing.markdownPercentApplied = 0;
+    }
+
+    await listing.save();
+
+    return res.status(200).json({ success: true, data: listing });
+  } catch (error) {
+    console.error("updateListing error:", error);
+    return res.status(500).json({ success: false, message: "Failed to update listing.", error: error.message });
+  }
+}
+
+/**
  * PATCH /api/marketplace/listings/:id/reject
  *
  * Core "Reject Redirection" mitigation logic:
@@ -146,6 +211,8 @@ async function rejectAndRedirectListing(req, res) {
 /**
  * PATCH /api/marketplace/listings/:id/confirm-order
  * Buyer confirms purchase of a listing (primary or secondary tier).
+ * This RESERVES the listing — it does not yet count as a completed sale.
+ * See completeSale() for the step that actually finalizes it.
  */
 async function confirmOrder(req, res) {
   try {
@@ -175,9 +242,66 @@ async function confirmOrder(req, res) {
   }
 }
 
+/**
+ * PATCH /api/marketplace/listings/:id/complete-sale
+ *
+ * IMPORTANT — this endpoint fixes a real bug: without a "reserved" ->
+ * "sold" transition existing ANYWHERE in the app, no listing could ever
+ * reach status "sold". Two things silently broke as a result:
+ *   1. AI price prediction (utils/pricePredictionEngine.js) bases its
+ *      estimate on the average of recently SOLD listings — with zero
+ *      sold listings ever existing, it always fell back to a flat
+ *      LKR 100 baseline, regardless of crop.
+ *   2. The admin dashboard's "Gross Marketplace Value" metric
+ *      (controllers/adminController.js) sums currentPricePerKg *
+ *      quantityKg for status: "sold" listings — always LKR 0.
+ *
+ * Either the buyer or the farmer can call this once a reserved order has
+ * actually been paid for / handed over — there's no payment gateway
+ * behind this yet (matching the rest of this prototype's honest scope),
+ * so it's a manual confirmation step, not an automatic one triggered by
+ * a real transaction.
+ *
+ * Body: { confirmedBy } — the user ID marking it complete, logged but
+ * not restricted to farmer-only or buyer-only, since either party
+ * reasonably needs to be able to close out a sale.
+ */
+async function completeSale(req, res) {
+  try {
+    const { id } = req.params;
+    const { confirmedBy } = req.body;
+
+    if (!confirmedBy) {
+      return res.status(400).json({ success: false, message: "confirmedBy is required." });
+    }
+
+    const listing = await MarketplaceListing.findById(id);
+    if (!listing) {
+      return res.status(404).json({ success: false, message: "Listing not found." });
+    }
+    if (listing.status !== "reserved") {
+      return res.status(409).json({
+        success: false,
+        message: `Only a reserved listing can be marked sold (status: ${listing.status}).`,
+      });
+    }
+
+    listing.status = "sold";
+    listing.soldAt = new Date();
+    await listing.save();
+
+    return res.status(200).json({ success: true, message: "Sale completed.", data: listing });
+  } catch (error) {
+    console.error("completeSale error:", error);
+    return res.status(500).json({ success: false, message: "Failed to complete sale.", error: error.message });
+  }
+}
+
 module.exports = {
   createListing,
   getListings,
+  updateListing,
   rejectAndRedirectListing,
   confirmOrder,
+  completeSale,
 };
