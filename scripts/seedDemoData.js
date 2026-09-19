@@ -117,7 +117,7 @@ async function main() {
     // [cropType, kg, pricePerKg, days ago]
     ["Tomato", 300, 165, 55], ["Tomato", 250, 172, 42], ["Tomato", 400, 158, 30], ["Tomato", 350, 181, 18], ["Tomato", 300, 190, 7],
     ["Carrot", 200, 210, 50], ["Carrot", 260, 225, 33], ["Carrot", 180, 240, 14],
-    ["Beans", 150, 320, 45], ["Beans", 170, 345, 26], ["Beans", 120, 360, 9],
+    ["Beans (Bush)", 150, 320, 45], ["Beans (Bush)", 170, 345, 26], ["Beans (Bush)", 120, 360, 9],
     ["Pumpkin", 500, 90, 38], ["Pumpkin", 420, 95, 12],
   ];
   await MarketplaceListing.insertMany(
@@ -146,7 +146,7 @@ async function main() {
     targetBuyerSegment: ["supermarket", "hotel", "exporter"],
   });
   await MarketplaceListing.create({
-    farmer: farmer._id, cropType: "Brinjal", quantityKg: 180, originalPricePerKg: 140, currentPricePerKg: 140,
+    farmer: farmer._id, cropType: "Brinjal (Eggplant)", quantityKg: 180, originalPricePerKg: 140, currentPricePerKg: 140,
     harvestDate: daysFromNow(2), qualityGrade: "B", tier: "primary", status: "listed",
     targetBuyerSegment: ["supermarket", "hotel", "exporter"],
   });
@@ -158,7 +158,7 @@ async function main() {
     rejectionHistory: [{ rejectedBy: buyer._id, reason: "Slight size variation, not suitable for hotel plating", defectType: "size_mismatch", rejectedAt: daysAgo(1) }],
   });
   await MarketplaceListing.create({
-    farmer: farmer._id, cropType: "Beans", quantityKg: 90, originalPricePerKg: 350, currentPricePerKg: 350,
+    farmer: farmer._id, cropType: "Beans (Bush)", quantityKg: 90, originalPricePerKg: 350, currentPricePerKg: 350,
     harvestDate: daysAgo(0), qualityGrade: "A", tier: "primary", status: "reserved", orderedBy: buyer._id,
     targetBuyerSegment: ["supermarket", "hotel", "exporter"],
   });
@@ -175,7 +175,7 @@ async function main() {
     ],
   });
   await CrowdfundingCampaign.create({
-    farmer: farmer._id, timelineRef: "demo-timeline-beans", cropType: "Beans",
+    farmer: farmer._id, timelineRef: "demo-timeline-beans", cropType: "Beans (Bush)",
     description: "Trellis poles and organic fertilizer for a bean crop.",
     fundingGoalLkr: 50000, amountRaisedLkr: 50000, returnPercentage: 10, deadline: daysFromNow(25), status: "funded",
     pledges: [{ investor: buyer._id, amountLkr: 50000, expectedReturnLkr: 55000, status: "pledged", pledgedAt: daysAgo(3) }],
