@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const { computeFreshness } = require("../utils/shelfLife");
 
 const SECONDARY_MARKUP_DOWN_PERCENT = 20; // discount applied when redirected to secondary tier
 const MAX_TOTAL_MARKDOWN_PERCENT = 40; // cap so a farmer never loses more than 40% to rejections
@@ -90,9 +91,16 @@ async function getListings(req, res) {
 
     const listings = await MarketplaceListing.find(filter)
       .populate("farmer", "fullName phone farmerProfile.district")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
-    return res.status(200).json({ success: true, count: listings.length, data: listings });
+    // FRESHNESS CLOCK: attach the live freshness picture (days left, label,
+    // and the current price after freshness) to every listing. Calculated at
+    // request time, so it is always up to date and never stored.
+    const now = new Date();
+    const data = listings.map((listing) => ({ ...listing, freshness: computeFreshness(listing, now) }));
+
+    return res.status(200).json({ success: true, count: data.length, data });
   } catch (error) {
     console.error("getListings error:", error);
     return res.status(500).json({ success: false, message: "Failed to fetch listings.", error: error.message });
@@ -284,9 +292,30 @@ async function confirmOrder(req, res) {
       return res.status(400).json({ success: false, message: "A valid buyerId is required." });
     }
 
+    const existing = await MarketplaceListing.findById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Listing not found." });
+    }
+    if (existing.farmer.toString() === String(buyerId)) {
+      return res.status(403).json({ success: false, message: "You cannot buy your own listing." });
+    }
+
+    // FRESHNESS CLOCK: produce past its sell-by window can no longer be sold
+    // as fresh primary-market stock. It is still available in the Secondary
+    // Market (factories / restaurants / compost hubs) at the reduced price.
+    const freshness = computeFreshness(existing);
+    if (freshness.expired && existing.tier === "primary") {
+      return res.status(409).json({
+        success: false,
+        message: "This produce has passed its freshness window. It can now only be bought through the Secondary Market.",
+      });
+    }
+
     const reserved = await MarketplaceListing.findOneAndUpdate(
       { _id: id, status: "listed", farmer: { $ne: buyerId } },
-      { $set: { status: "reserved", orderedBy: buyerId } },
+      // agreedPricePerKg locks in today's freshness-adjusted price, so the
+      // buyer pays what they saw when they tapped Confirm.
+      { $set: { status: "reserved", orderedBy: buyerId, agreedPricePerKg: freshness.effectivePricePerKg } },
       { new: true }
     );
 
@@ -295,14 +324,12 @@ async function confirmOrder(req, res) {
     }
 
     // Nothing was updated — work out why so the message is accurate.
-    const listing = await MarketplaceListing.findById(id);
-    if (!listing) {
-      return res.status(404).json({ success: false, message: "Listing not found." });
-    }
-    if (listing.farmer.toString() === String(buyerId)) {
-      return res.status(403).json({ success: false, message: "You cannot buy your own listing." });
-    }
-    return res.status(409).json({ success: false, message: `Listing is not available (status: ${listing.status}).` });
+    // Someone else reserved it (or its status changed) between our read and write.
+    const latest = await MarketplaceListing.findById(id);
+    return res.status(409).json({
+      success: false,
+      message: `Listing is not available (status: ${latest ? latest.status : "removed"}).`,
+    });
   } catch (error) {
     console.error("confirmOrder error:", error);
     return res.status(500).json({ success: false, message: "Failed to confirm order.", error: error.message });
@@ -349,7 +376,15 @@ async function completeSale(req, res) {
 
     const sold = await MarketplaceListing.findOneAndUpdate(
       { _id: id, status: "reserved" },
-      { $set: { status: "sold", soldAt: new Date() } },
+      {
+        $set: {
+          status: "sold",
+          soldAt: new Date(),
+          // Record the REAL price the produce sold for (after any freshness
+          // discount), so price prediction learns from true sale prices.
+          ...(listing.agreedPricePerKg ? { currentPricePerKg: listing.agreedPricePerKg } : {}),
+        },
+      },
       { new: true }
     );
     if (!sold) {

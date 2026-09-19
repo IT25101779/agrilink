@@ -55,6 +55,10 @@ const MarketplaceListingSchema = new mongoose.Schema(
     // both key off. See marketplaceController.completeSale for why this
     // field needed to exist at all.
     soldAt: { type: Date },
+    // The per-kg price locked in when a buyer confirmed the order. With the
+    // Freshness Clock the live price changes daily, so the price at the
+    // moment of reservation is recorded here (and becomes the sold price).
+    agreedPricePerKg: { type: Number },
   },
   { timestamps: true }
 );

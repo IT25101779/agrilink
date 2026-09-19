@@ -52,6 +52,9 @@ const UserSchema = new mongoose.Schema(
     resetPasswordOtpHash: { type: String, select: false },
     resetPasswordExpires: { type: Date, select: false },
     resetPasswordAttempts: { type: Number, default: 0, select: false },
+    // Random code that makes up the shareable Farm Passport link/QR. Rotating
+    // it (a new random value) instantly kills any link that was shared before.
+    passportToken: { type: String, unique: true, sparse: true, select: false },
   },
   { timestamps: true }
 );

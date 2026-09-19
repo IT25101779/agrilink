@@ -255,13 +255,15 @@ async function repayCampaign(req, res) {
       return res.status(400).json({ success: false, message: "Invalid campaign id." });
     }
 
-    const campaign = await CrowdfundingCampaign.findOneAndUpdate(
+    // Step 1: claim the "funded -> repaid" transition. Only ONE request can
+    // win this, so the credit-score reward below can never be given twice.
+    const claimed = await CrowdfundingCampaign.findOneAndUpdate(
       { _id: id, status: "funded" },
-      { $set: { status: "repaid", "pledges.$[].status": "repaid" } },
+      { $set: { status: "repaid" } },
       { new: true }
     );
 
-    if (!campaign) {
+    if (!claimed) {
       const existing = await CrowdfundingCampaign.findById(id);
       if (!existing) {
         return res.status(404).json({ success: false, message: "Campaign not found." });
@@ -269,17 +271,17 @@ async function repayCampaign(req, res) {
       return res.status(409).json({ success: false, message: `Only fully-funded campaigns can be repaid (status: ${existing.status}).` });
     }
 
-    // Reward successful repayment: +1 completed timeline, +25 credit score (capped at 1000).
-    await User.findByIdAndUpdate(campaign.farmer, [
-      {
-        $set: {
-          "farmerProfile.completedTimelinesCount": { $add: [{ $ifNull: ["$farmerProfile.completedTimelinesCount", 0] }, 1] },
-          "farmerProfile.creditScore": {
-            $min: [{ $add: [{ $ifNull: ["$farmerProfile.creditScore", 500] }, 25] }, 1000],
-          },
-        },
-      },
-    ]);
+    // Step 2: mark every pledge as repaid.
+    const repaidPledges = claimed.toObject().pledges.map((p) => ({ ...p, status: "repaid" }));
+    const campaign = await CrowdfundingCampaign.findByIdAndUpdate(id, { $set: { pledges: repaidPledges } }, { new: true });
+
+    // Step 3: reward successful repayment: +1 completed timeline, +25 credit
+    // score, never above the 1000 ceiling.
+    await User.updateOne(
+      { _id: campaign.farmer },
+      { $inc: { "farmerProfile.completedTimelinesCount": 1, "farmerProfile.creditScore": 25 } }
+    );
+    await User.updateOne({ _id: campaign.farmer, "farmerProfile.creditScore": { $gt: 1000 } }, { $set: { "farmerProfile.creditScore": 1000 } });
 
     const totalRepaidLkr = round2(campaign.pledges.reduce((sum, p) => sum + p.expectedReturnLkr, 0));
 

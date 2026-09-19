@@ -19,6 +19,10 @@ const supplierRoutes = require("./routes/suppliers");
 const timelineRoutes = require("./routes/timelines");
 // const whatsappRoutes = require("./routes/whatsapp");
 const communityListingRoutes = require("./routes/communityListings");
+const insightsRoutes = require("./routes/insights");
+const passportRoutes = require("./routes/passport");
+const groupLotRoutes = require("./routes/groupLots");
+const demandRoutes = require("./routes/demand");
 
 const app = express();
 
@@ -62,6 +66,10 @@ app.use("/api/suppliers", supplierRoutes);
 app.use("/api/timelines", timelineRoutes);
 // app.use("/api/whatsapp", whatsappRoutes); // re-enable together with the require() above once WhatsApp is configured
 app.use("/api/community-listings", communityListingRoutes);
+app.use("/api/insights", insightsRoutes);
+app.use("/api/passport", passportRoutes);
+app.use("/api/group-lots", groupLotRoutes);
+app.use("/api/demand", demandRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {
