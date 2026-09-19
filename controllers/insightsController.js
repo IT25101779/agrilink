@@ -5,6 +5,7 @@ const Reminder = require("../models/Reminder");
 const User = require("../models/User");
 const { buildForecast } = require("../utils/priceForecast");
 const { adviseListing, sortByUrgency } = require("../utils/sellOrHold");
+const { planProfit } = require("../utils/cropEconomics");
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -118,7 +119,7 @@ async function getPriceTrend(cropType) {
   const recentStart = now - TREND_RECENT_DAYS * MS_PER_DAY;
   const priorStart = new Date(now - TREND_PRIOR_DAYS * MS_PER_DAY);
 
-  const sold = await MarketplaceListing.find({ cropType, status: "sold", updatedAt: { $gte: priorStart } })
+  const sold = await MarketplaceListing.find({ cropType, status: "sold", tier: "primary", updatedAt: { $gte: priorStart } })
     .select("currentPricePerKg updatedAt")
     .lean();
 
@@ -221,6 +222,47 @@ async function getSellOrHold(req, res) {
   }
 }
 
+/**
+ * GET /api/insights/profit-plan/:cropType?acres=1&yieldKgPerAcre=&costPerAcre=&pricePerKg=
+ * PROFIT PLANNER: estimated cost, harvest and profit range for one crop.
+ * Any of the last three parameters overrides the typical planning figure.
+ */
+async function getProfitPlan(req, res) {
+  try {
+    const cropType = String(req.params.cropType || "").trim();
+    if (!cropType) return res.status(400).json({ success: false, message: "cropType is required." });
+
+    const acres = req.query.acres === undefined ? 1 : Number(req.query.acres);
+    if (!Number.isFinite(acres) || acres < 0.1 || acres > 100) {
+      return res.status(400).json({ success: false, message: "acres must be between 0.1 and 100." });
+    }
+
+    const overrides = {};
+    for (const key of ["yieldKgPerAcre", "costPerAcre", "pricePerKg"]) {
+      if (req.query[key] === undefined || req.query[key] === "") continue;
+      const value = Number(req.query[key]);
+      if (!Number.isFinite(value) || value <= 0) {
+        return res.status(400).json({ success: false, message: `${key} must be a positive number.` });
+      }
+      overrides[key] = value;
+    }
+
+    const district = await getFarmerDistrict(req.userId);
+    const [forecast, signals] = await Promise.all([
+      buildForecast(cropType, { weeks: 16 }),
+      district ? computeDistrictSignals(district) : Promise.resolve({ crops: [], enoughData: false }),
+    ]);
+    const match = signals.crops.find((c) => String(c.cropType).toLowerCase() === cropType.toLowerCase());
+    const saturationLevel = match ? match.level : signals.enoughData ? "low" : "unknown";
+
+    const plan = planProfit({ cropType, acres, overrides, forecast, saturationLevel });
+    return res.status(200).json({ success: true, data: { ...plan, district, saturationLevel } });
+  } catch (error) {
+    console.error("getProfitPlan error:", error);
+    return res.status(500).json({ success: false, message: "Failed to build the profit plan." });
+  }
+}
+
 const ALERT_TITLES = {
   sell_now: (crop) => `Sell soon: ${crop}`,
   hold: (crop) => `Hold: ${crop}`,
@@ -270,6 +312,7 @@ module.exports = {
   getPriceForecast,
   getSellOrHold,
   generatePriceAlerts,
+  getProfitPlan,
   // exported for tests
   computeDistrictSignals,
   classifySaturation,

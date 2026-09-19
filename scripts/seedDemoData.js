@@ -14,6 +14,15 @@
  *   - BUYER DEMAND BOARD: three open buyer requests, one with a farmer offer
  *   - Crowdfunding campaigns (one 60% funded, one fully funded, one repaid),
  *     which feed the FARM PASSPORT
+ *   - 25 more farmers across 6 more districts (Nuwara Eliya, Anuradhapura,
+ *     Kurunegala, Badulla, Jaffna, Galle) so the admin MARKET HEATMAP has
+ *     hotspots and quiet districts to show
+ *   - Produce rescued from waste (rejected, then sold on the flash-sale
+ *     market), one completed group sale and one fulfilled buyer request, so
+ *     the admin IMPACT DASHBOARD has real numbers to add up
+ *   - A demo farmer whose account is 120 days old, so the LOAN READINESS
+ *     checklist shows 7 of 8 checks (the last one, a group sale, is what you
+ *     complete live in the demo)
  *
  * SAFE TO RE-RUN: it first deletes everything it created before (data tied
  * to the demo accounts) and recreates it fresh. It never touches real
@@ -96,6 +105,7 @@ async function main() {
 
   const farmer = await User.create({
     fullName: "Nimal Perera (Demo Farmer)",
+    createdAt: daysAgo(120),
     email: FARMER_EMAIL,
     phone: "+94771234567",
     passwordHash,
@@ -116,6 +126,16 @@ async function main() {
     passwordHash,
     role: "buyer",
     buyerProfile: { companyName: "Green Basket Hotels", buyerType: "hotel", verifiedBusiness: true },
+  });
+
+  // A second buyer, so some group sales / requests are already "someone else's"
+  const buyer2 = await User.create({
+    fullName: "Lanka Fresh Exports (Demo Buyer 2)",
+    email: `buyer2${NEIGHBOUR_DOMAIN}`,
+    phone: "+94112223344",
+    passwordHash,
+    role: "buyer",
+    buyerProfile: { companyName: "Lanka Fresh Exports", buyerType: "exporter", verifiedBusiness: true },
   });
 
   const neighbours = [];
@@ -163,6 +183,61 @@ async function main() {
     }
   }
   console.log(`Created ${timelineCount} active crop timelines for neighbours.`);
+
+  // ---- 3b. More districts (feeds the admin Market Heatmap) ----
+  // [district, [[crop, number of farmers growing it], ...]]
+  const EXTRA_DISTRICTS = [
+    ["Nuwara Eliya", [["Carrot", 5], ["Cabbage", 3], ["Leeks", 2], ["Beetroot", 2]]],
+    ["Anuradhapura", [["Paddy (Rice)", 6], ["Okra (Bandakka)", 3], ["Pumpkin", 2], ["Watermelon", 2]]],
+    ["Kurunegala", [["Brinjal (Eggplant)", 4], ["Okra (Bandakka)", 3], ["Beans (Bush)", 2], ["Chili", 2]]],
+    ["Badulla", [["Tomato", 4], ["Beans (Bush)", 3], ["Cabbage", 2]]],
+    ["Jaffna", [["Chili", 4], ["Onion (Big/Red)", 4], ["Brinjal (Eggplant)", 2]]],
+    ["Galle", [["Cucumber", 2], ["Snake Gourd", 2], ["Okra (Bandakka)", 2], ["Bitter Gourd", 2]]],
+  ];
+  const DISTRICT_COORDS = {
+    "Nuwara Eliya": [80.77, 6.97], Anuradhapura: [80.41, 8.31], Kurunegala: [80.36, 7.49],
+    Badulla: [81.05, 6.99], Jaffna: [80.01, 9.66], Galle: [80.22, 6.03],
+  };
+  let extraFarmerCount = 0;
+  let extraTimelineCount = 0;
+  for (const [district, cropCounts] of EXTRA_DISTRICTS) {
+    const farmersNeeded = Math.max(...cropCounts.map(([, count]) => count));
+    const [lng, lat] = DISTRICT_COORDS[district];
+    const created = [];
+    for (let i = 0; i < farmersNeeded; i++) {
+      extraFarmerCount += 1;
+      created.push(
+        await User.create({
+          fullName: `${district} Farmer ${i + 1}`,
+          email: `d${extraFarmerCount}${NEIGHBOUR_DOMAIN}`,
+          phone: `+9476${String(2000000 + extraFarmerCount * 137).slice(0, 7)}`,
+          passwordHash,
+          role: "farmer",
+          farmerProfile: {
+            district, landSizeAcres: 1, soilType: "loamy",
+            gpsLocation: { type: "Point", coordinates: [lng + i * 0.01, lat + i * 0.01] },
+            creditScore: 540 + i * 10,
+          },
+        })
+      );
+    }
+    const rows = [];
+    for (const [cropType, count] of cropCounts) {
+      for (let i = 0; i < count; i++) {
+        const duration = CROP_DURATION_DAYS[cropType] || 80;
+        const plantedDaysAgo = 8 + ((i * 5 + extraTimelineCount) % 30);
+        extraTimelineCount += 1;
+        rows.push({
+          farmer: created[i]._id, cropType, landSizeAcres: 0.5 + (i % 3) * 0.5, soilType: "loamy",
+          gpsLocation: { type: "Point", coordinates: [lng + i * 0.01, lat + i * 0.01] },
+          plantingDate: daysAgo(plantedDaysAgo), expectedHarvestDate: daysFromNow(Math.max(10, duration - plantedDaysAgo)),
+          status: "active", localId: `seed-x${extraTimelineCount}`, syncStatus: "synced",
+        });
+      }
+    }
+    await CultivationTimeline.insertMany(rows);
+  }
+  console.log(`Created ${extraFarmerCount} more farmers and ${extraTimelineCount} timelines across 6 more districts.`);
 
   // ---- 4. Late Blight outbreak cluster around Kandy ----
   const outbreakOffsets = [[0, 0], [0.02, 0.01], [-0.018, 0.015], [0.012, -0.022], [-0.025, -0.01], [0.03, 0.02]];
@@ -251,6 +326,19 @@ async function main() {
     farmer: farmer._id, cropType: "Pumpkin", quantityKg: 200, originalPricePerKg: 100, currentPricePerKg: 100, agreedPricePerKg: 100,
     harvestDate: daysAgo(2), qualityGrade: "A", tier: "primary", status: "reserved", orderedBy: buyer._id, targetBuyerSegment: primarySegments,
   });
+  // Produce a buyer rejected that still SOLD on the flash-sale market: "waste rescued".
+  const rescuedSales = [
+    ["Tomato", 200, 230, 110, 5], ["Carrot", 300, 230, 150, 8], ["Cabbage", 150, 110, 70, 3],
+  ];
+  await MarketplaceListing.insertMany(
+    rescuedSales.map(([cropType, kg, original, price, ago]) => ({
+      farmer: farmer._id, cropType, quantityKg: kg, originalPricePerKg: original, currentPricePerKg: price, agreedPricePerKg: price,
+      markdownPercentApplied: Math.round((1 - price / original) * 100), harvestDate: daysAgo(ago + 2), qualityGrade: "B",
+      tier: "secondary", targetBuyerSegment: ["factory", "restaurant", "compost_hub"], status: "sold", orderedBy: buyer2._id, soldAt: daysAgo(ago),
+      rejectionHistory: [{ rejectedBy: buyer._id, reason: "Cosmetic defects", defectType: "visual_defect", rejectedAt: daysAgo(ago + 1) }],
+      createdAt: daysAgo(ago + 3), updatedAt: daysAgo(ago),
+    }))
+  );
   console.log("Created sold history + live listings at different freshness stages.");
 
   // ---- 7. Group lots ----
@@ -271,6 +359,13 @@ async function main() {
     committedKg: 40, status: "open", closesAt: daysFromNow(6),
   });
 
+  // A group sale that already completed (claimed by the second buyer)
+  await GroupLot.create({
+    cropType: "Cabbage", district: "Kandy", targetKg: 300, pricePerKg: 80, pickupNote: "Kandy market, Gate 1",
+    createdBy: n(8)._id, members: [{ farmer: n(8)._id, quantityKg: 120 }, { farmer: n(4)._id, quantityKg: 100 }, { farmer: n(5)._id, quantityKg: 80 }],
+    committedKg: 300, status: "claimed", claimedBy: buyer2._id, claimedAt: daysAgo(6), closesAt: daysAgo(5),
+  });
+
   // ---- 8. Buyer demand board ----
   const beansRequest = await DemandRequest.create({
     buyer: buyer._id, cropType: "Beans (Bush)", quantityKg: 300, maxPricePerKg: 420, neededBy: daysFromNow(9),
@@ -283,7 +378,16 @@ async function main() {
   await DemandRequest.create({
     buyer: buyer._id, cropType: "Pumpkin", quantityKg: 500, maxPricePerKg: 110, neededBy: daysFromNow(12), district: "Kandy", note: "Bulk order for our restaurant group.",
   });
-  console.log("Created 3 group lots and 3 buyer requests (one already has a farmer offer).");
+  // A request that has already been fully covered
+  await DemandRequest.create({
+    buyer: buyer2._id, cropType: "Carrot", quantityKg: 200, maxPricePerKg: 240, neededBy: daysFromNow(2), district: "Kandy",
+    status: "fulfilled", fulfilledKg: 200,
+    offers: [
+      { farmer: n(4)._id, quantityKg: 120, pricePerKg: 230, status: "accepted", acceptedKg: 120 },
+      { farmer: n(5)._id, quantityKg: 80, pricePerKg: 235, status: "accepted", acceptedKg: 80 },
+    ],
+  });
+  console.log("Created 4 group lots and 4 buyer requests (one with a farmer offer, one already fulfilled).");
 
   // ---- 9. Crowdfunding (also feeds the Farm Passport) ----
   await CrowdfundingCampaign.create({
@@ -312,7 +416,7 @@ async function main() {
   console.log("\nDONE. Demo logins:");
   console.log(`  Farmer : ${FARMER_EMAIL} / ${DEMO_PASSWORD}`);
   console.log(`  Buyer  : ${BUYER_EMAIL} / ${DEMO_PASSWORD}`);
-  console.log(`  (12 neighbour farmers were also created — they're only there to make the district data realistic.)`);
+  console.log(`  (37 neighbour farmers and a second buyer were also created — they're only there to make the district data realistic.)`);
   await mongoose.disconnect();
 }
 

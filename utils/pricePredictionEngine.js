@@ -47,6 +47,9 @@ async function getHistoricalAveragePrice(cropType, lookbackDays = 90) {
       $match: {
         cropType: cropType,
         status: "sold",
+        // Flash-sale (secondary tier) sales are deliberately discounted, so
+        // they must not drag down the price of FRESH produce.
+        tier: "primary",
         updatedAt: { $gte: sinceDate },
       },
     },

@@ -39,6 +39,42 @@ function passportLabel(userId) {
   return `AL-${digest}`;
 }
 
+/**
+ * LOAN READINESS: an 8-point checklist of the things a lender or investor
+ * typically likes to see, with how far along the farmer is on each.
+ *
+ * It is AgriLink's own checklist to guide farmers — NOT a bank's criteria
+ * and not a credit decision. The thresholds are easy to tune here.
+ */
+function buildReadiness({ stats, creditScore, memberSince, now = new Date() }) {
+  const memberDays = Math.floor((now.getTime() - new Date(memberSince).getTime()) / (24 * 60 * 60 * 1000));
+  const check = (id, label, met, current, target, tip) => ({ id, label, met, current, target, tip });
+
+  const checks = [
+    check("cycles", "Complete 2 crop cycles", stats.completedTimelines >= 2, stats.completedTimelines, 2,
+      "Finish a crop timeline (or repay a funded campaign) to add a completed cycle."),
+    check("sales", "Make 5 completed sales", stats.salesCompleted >= 5, stats.salesCompleted, 5,
+      "List produce on the marketplace and mark orders as sold."),
+    check("volume", "Reach LKR 100,000 in total sales", stats.salesValueLkr >= 100000, Math.round(stats.salesValueLkr), 100000,
+      "Sell more produce, or join Group Lots to reach bulk buyers."),
+    check("quality", "Keep buyer rejections at 20% or less", stats.salesCompleted > 0 && stats.buyerRejectionRatePercent <= 20,
+      stats.buyerRejectionRatePercent, 20, "Grade and pack produce carefully; sell while it is still fresh."),
+    check("repayment", "Repay one funding campaign", stats.fundingRepaidCampaigns >= 1, stats.fundingRepaidCampaigns, 1,
+      "Ask investors to fund a crop, then repay after harvest."),
+    check("score", "Reach a credit score of 600", creditScore >= 600, creditScore, 600,
+      "The score grows with completed cycles and repaid funding."),
+    check("community", "Complete one group sale", stats.groupSalesCompleted >= 1, stats.groupSalesCompleted, 1,
+      "Join a Group Lot in the Market tab and wait for a buyer to claim it."),
+    check("history", "Be active for 60 days", memberDays >= 60, Math.max(0, memberDays), 60,
+      "A longer record builds trust; keep using AgriLink."),
+  ];
+
+  const passed = checks.filter((c) => c.met).length;
+  const percent = Math.round((passed / checks.length) * 100);
+  const level = percent >= 75 ? "loan_ready" : percent >= 50 ? "almost_ready" : "getting_started";
+  return { percent, level, passed, total: checks.length, checks };
+}
+
 async function buildPassport(userId) {
   const user = await User.findById(userId).select("fullName createdAt role farmerProfile").lean();
   if (!user) return null;
@@ -75,6 +111,23 @@ async function buildPassport(userId) {
     return sum + (mine ? mine.quantityKg : 0);
   }, 0);
 
+  const passportStats = {
+    completedTimelines,
+    activeTimelines,
+    salesCompleted: sold.length,
+    kgSold: round2(soldKg),
+    salesValueLkr,
+    cropsSold,
+    buyerRejectionRatePercent: listings.length ? Math.round((rejected / listings.length) * 100) : 0,
+    fundingCampaignsFunded: fundedOrRepaid.length,
+    fundingRaisedLkr: totalRaisedLkr,
+    fundingRepaidCampaigns: repaid.length,
+    fundingRepaidLkr: totalRepaidLkr,
+    investorsBacked: investors.size,
+    groupSalesCompleted: lots.length,
+    groupKgContributed: round2(groupKg),
+  };
+
   return {
     passportId: passportLabel(userId),
     name: user.fullName,
@@ -82,22 +135,8 @@ async function buildPassport(userId) {
     memberSince: user.createdAt,
     creditScore,
     creditBand: creditBand(creditScore),
-    stats: {
-      completedTimelines,
-      activeTimelines,
-      salesCompleted: sold.length,
-      kgSold: round2(soldKg),
-      salesValueLkr,
-      cropsSold,
-      buyerRejectionRatePercent: listings.length ? Math.round((rejected / listings.length) * 100) : 0,
-      fundingCampaignsFunded: fundedOrRepaid.length,
-      fundingRaisedLkr: totalRaisedLkr,
-      fundingRepaidCampaigns: repaid.length,
-      fundingRepaidLkr: totalRepaidLkr,
-      investorsBacked: investors.size,
-      groupSalesCompleted: lots.length,
-      groupKgContributed: round2(groupKg),
-    },
+    stats: passportStats,
+    readiness: buildReadiness({ stats: passportStats, creditScore, memberSince: user.createdAt }),
     generatedAt: new Date().toISOString(),
   };
 }
@@ -116,8 +155,13 @@ function lkr(n) {
 }
 
 /** The public web page a lender or investor sees after scanning the QR code. */
+function readinessLabel(level) {
+  return level === "loan_ready" ? "Loan-ready" : level === "almost_ready" ? "Almost ready" : "Getting started";
+}
+
 function renderPassportHtml(p, { qrUrl } = {}) {
   const s = p.stats;
+  const r = p.readiness;
   const scorePct = Math.max(0, Math.min(100, Math.round(((p.creditScore - 300) / 700) * 100)));
   const memberSince = new Date(p.memberSince).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
   const bandColor = p.creditBand === "Excellent" ? "#0B5D3B" : p.creditBand === "Good" ? "#2E7D32" : "#B7791F";
@@ -157,6 +201,11 @@ function renderPassportHtml(p, { qrUrl } = {}) {
   .crops { font-size:14px; color:var(--ink); }
   .note { margin-top:22px; font-size:12px; color:var(--muted); background:#FFF9EC; border:1px solid #F3E2B5; padding:12px 14px; border-radius:12px; line-height:1.5; }
   .foot { text-align:center; font-size:11px; color:var(--muted); margin:16px 0 4px; }
+  .checks { list-style:none; padding:0; margin:12px 0 0; }
+  .checks li { padding:7px 0; border-bottom:1px solid var(--border); font-size:14px; color:var(--muted); }
+  .checks li.met { color:var(--ink); }
+  .checks .mark { display:inline-block; width:20px; color:var(--muted); }
+  .checks li.met .mark { color:var(--forest); font-weight:800; }
   .qr { text-align:center; margin-top:18px; }
   .qr img { width:120px; height:120px; }
 </style>
@@ -207,6 +256,13 @@ function renderPassportHtml(p, { qrUrl } = {}) {
         ${tile(s.groupKgContributed.toLocaleString("en-US") + " kg", "Contributed to group lots")}
       </div>
 
+      <h2>Loan readiness &middot; ${escapeHtml(r.passed)} of ${escapeHtml(r.total)} checks</h2>
+      <div class="bar"><div style="width:${escapeHtml(r.percent)}%"></div></div>
+      <div class="scale"><span>${escapeHtml(readinessLabel(r.level))}</span><span>${escapeHtml(r.percent)}%</span></div>
+      <ul class="checks">
+        ${r.checks.map((c) => `<li class="${c.met ? "met" : ""}"><span class="mark">${c.met ? "&#10003;" : "&#9675;"}</span> ${escapeHtml(c.label)}</li>`).join("")}
+      </ul>
+
       ${qrUrl ? `<div class="qr"><img src="${escapeHtml(qrUrl)}" alt="QR code for this passport"></div>` : ""}
 
       <div class="note">
@@ -220,4 +276,4 @@ function renderPassportHtml(p, { qrUrl } = {}) {
 </html>`;
 }
 
-module.exports = { buildPassport, renderPassportHtml, creditBand, passportLabel, escapeHtml };
+module.exports = { buildPassport, buildReadiness, renderPassportHtml, creditBand, passportLabel, escapeHtml };
