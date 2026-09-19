@@ -5,6 +5,15 @@ const KINDWISE_ENDPOINT = "https://crop.kindwise.com/api/v1/identification";
 const OUTBREAK_RADIUS_METERS = 10000; // 10km cluster radius
 const OUTBREAK_LOOKBACK_DAYS = 21;
 const OUTBREAK_THRESHOLD_COUNT = 5; // number of matching logs in cluster to declare an outbreak
+// Matches a crop name ignoring capital letters and stray spaces, so a farmer
+// typing "tomato", "Tomato " or "TOMATO" all count as the same crop when the
+// server looks for an outbreak cluster.
+function cropNameMatcher(name) {
+  const escaped = String(name).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+const MIN_CONFIDENCE_TO_LOG = 0.3; // below this, a guess is shown to the farmer but NOT stored or counted toward outbreaks
 
 /**
  * POST /api/disease/scan
@@ -76,7 +85,29 @@ async function scanCropImage(req, res) {
     }
 
     const kindwiseData = await kindwiseResponse.json();
-    const suggestions = kindwiseData?.result?.disease?.suggestions || [];
+    const kindwiseResult = kindwiseData?.result;
+
+    // Kindwise tells us when the photo doesn't look like a plant at all
+    // (a hand, a table, a blurry shot...). Say so instead of inventing a disease.
+    if (kindwiseResult?.is_plant?.binary === false) {
+      return res.status(422).json({
+        success: false,
+        message: "This photo doesn't look like a plant leaf. Please take a clear, close-up photo of the affected leaf.",
+      });
+    }
+
+    // Kindwise also reports whether the plant looks healthy. Previously this
+    // was ignored, so a healthy leaf could still be reported with its
+    // "most likely" disease.
+    if (kindwiseResult?.is_healthy?.binary === true) {
+      return res.status(200).json({
+        success: true,
+        message: "No disease detected. Crop appears healthy.",
+        data: { healthy: true },
+      });
+    }
+
+    const suggestions = kindwiseResult?.disease?.suggestions || [];
 
     if (suggestions.length === 0) {
       return res.status(200).json({
@@ -93,11 +124,16 @@ async function scanCropImage(req, res) {
     const severity = topMatch.details?.severity || null;
     const symptoms = topMatch.details?.symptoms || null;
 
+    // Low-confidence guesses are still shown to the farmer (with a warning
+    // flag) but are not stored or counted, so they can't create a fake
+    // outbreak on the Outbreak Radar.
+    const lowConfidence = typeof confidenceScore === "number" && confidenceScore < MIN_CONFIDENCE_TO_LOG;
+
     // ---- Log this scan (always in English — this is the canonical record) ----
-    const diseaseLog = await DiseaseLog.create({
+    const diseaseLog = lowConfidence ? null : await DiseaseLog.create({
       farmer,
       timelineRef,
-      cropType,
+      cropType: String(cropType).trim(),
       imageUrl: "stored_client_side", // swap for real cloud storage URL (S3/Cloudinary) in production
       detectedDisease,
       confidenceScore,
@@ -110,8 +146,8 @@ async function scanCropImage(req, res) {
     const since = new Date();
     since.setDate(since.getDate() - OUTBREAK_LOOKBACK_DAYS);
 
-    const nearbyMatches = await DiseaseLog.find({
-      cropType,
+    const nearbyMatches = lowConfidence ? [] : await DiseaseLog.find({
+      cropType: cropNameMatcher(cropType),
       detectedDisease,
       createdAt: { $gte: since },
       location: {
@@ -186,7 +222,8 @@ async function scanCropImage(req, res) {
     return res.status(201).json({
       success: true,
       data: {
-        diseaseLogId: diseaseLog._id,
+        diseaseLogId: diseaseLog ? diseaseLog._id : null,
+        lowConfidence,
         detectedDisease: responseDiseaseName,
         detectedDiseaseEnglish: detectedDisease, // kept for any client-side logic that needs the canonical name
         confidenceScore,

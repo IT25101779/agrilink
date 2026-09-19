@@ -51,12 +51,12 @@ const UserSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     resetPasswordOtpHash: { type: String, select: false },
     resetPasswordExpires: { type: Date, select: false },
+    resetPasswordAttempts: { type: Number, default: 0, select: false },
   },
   { timestamps: true }
 );
 
 UserSchema.index({ "farmerProfile.gpsLocation": "2dsphere" });
-UserSchema.index({ email: 1 }, { unique: true });
 
 UserSchema.methods.comparePassword = function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.passwordHash);

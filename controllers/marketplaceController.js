@@ -1,7 +1,19 @@
+const mongoose = require("mongoose");
 const MarketplaceListing = require("../models/MarketplaceListing");
 
 const SECONDARY_MARKUP_DOWN_PERCENT = 20; // discount applied when redirected to secondary tier
+const MAX_TOTAL_MARKDOWN_PERCENT = 40; // cap so a farmer never loses more than 40% to rejections
 const SECONDARY_SEGMENTS = ["factory", "restaurant", "compost_hub"];
+const VALID_GRADES = ["A", "B", "C"];
+
+function isValidId(id) {
+  return typeof id === "string" && mongoose.isValidObjectId(id);
+}
+
+function isPositiveNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0;
+}
 
 /**
  * POST /api/marketplace/listings
@@ -9,16 +21,7 @@ const SECONDARY_SEGMENTS = ["factory", "restaurant", "compost_hub"];
  */
 async function createListing(req, res) {
   try {
-    const {
-      farmer,
-      timelineRef,
-      cropType,
-      quantityKg,
-      pricePerKg,
-      harvestDate,
-      qualityGrade,
-      photos,
-    } = req.body;
+    const { farmer, timelineRef, cropType, quantityKg, pricePerKg, harvestDate, qualityGrade, photos } = req.body;
 
     if (!farmer || !cropType || !quantityKg || !pricePerKg || !harvestDate) {
       return res.status(400).json({
@@ -26,17 +29,29 @@ async function createListing(req, res) {
         message: "farmer, cropType, quantityKg, pricePerKg, and harvestDate are required.",
       });
     }
+    if (!isValidId(String(farmer))) {
+      return res.status(400).json({ success: false, message: "farmer is not a valid user id." });
+    }
+    if (!isPositiveNumber(quantityKg) || !isPositiveNumber(pricePerKg)) {
+      return res.status(400).json({ success: false, message: "quantityKg and pricePerKg must be positive numbers." });
+    }
+    if (Number.isNaN(new Date(harvestDate).getTime())) {
+      return res.status(400).json({ success: false, message: "harvestDate is not a valid date." });
+    }
+    if (qualityGrade !== undefined && !VALID_GRADES.includes(qualityGrade)) {
+      return res.status(400).json({ success: false, message: "qualityGrade must be A, B or C." });
+    }
 
     const listing = await MarketplaceListing.create({
       farmer,
       timelineRef,
       cropType,
-      quantityKg,
-      originalPricePerKg: pricePerKg,
-      currentPricePerKg: pricePerKg,
+      quantityKg: Number(quantityKg),
+      originalPricePerKg: Number(pricePerKg),
+      currentPricePerKg: Number(pricePerKg),
       harvestDate,
       qualityGrade: qualityGrade || "A",
-      photos: photos || [],
+      photos: Array.isArray(photos) ? photos : [],
       tier: "primary",
       targetBuyerSegment: ["supermarket", "hotel", "exporter"],
       status: "listed",
@@ -51,18 +66,27 @@ async function createListing(req, res) {
 
 /**
  * GET /api/marketplace/listings
- * Supports filtering by tier, cropType, status. Used by both the primary
- * B2B buyer portal (tier=primary) and the secondary flash-sale view (tier=secondary).
+ * Supports filtering by tier, cropType, status, buyerSegment, orderedBy and
+ * (new) farmer. The farmer filter lets the mobile app ask the server for
+ * only ITS listings instead of downloading every listing in the system and
+ * filtering on the phone.
  */
 async function getListings(req, res) {
   try {
-    const { tier, cropType, status, buyerSegment, orderedBy } = req.query;
+    const { tier, cropType, status, buyerSegment, orderedBy, farmer } = req.query;
     const filter = {};
     if (tier) filter.tier = tier;
     if (cropType) filter.cropType = cropType;
     if (status) filter.status = status;
     if (buyerSegment) filter.targetBuyerSegment = buyerSegment;
-    if (orderedBy) filter.orderedBy = orderedBy;
+    if (orderedBy) {
+      if (!isValidId(orderedBy)) return res.status(400).json({ success: false, message: "orderedBy is not a valid id." });
+      filter.orderedBy = orderedBy;
+    }
+    if (farmer) {
+      if (!isValidId(farmer)) return res.status(400).json({ success: false, message: "farmer is not a valid id." });
+      filter.farmer = farmer;
+    }
 
     const listings = await MarketplaceListing.find(filter)
       .populate("farmer", "fullName phone farmerProfile.district")
@@ -77,33 +101,35 @@ async function getListings(req, res) {
 
 /**
  * PATCH /api/marketplace/listings/:id
- * Lets the farmer who owns a listing edit it — quantity, their asking
- * price, harvest date, quality grade, or photos. Previously there was no
- * way for a farmer to change anything after posting, including the price
- * (only the automatic reject-markdown could change it). Only allowed
- * while the listing is still "listed" — once it's reserved or sold,
- * editing the terms out from under a buyer would be a real problem, so
- * that's blocked here rather than left to the frontend to enforce.
- *
+ * Lets the farmer who owns a listing edit it while it is still "listed".
  * Body: { farmerId, quantityKg?, pricePerKg?, harvestDate?, qualityGrade?, photos? }
- * farmerId must match the listing's owner — this API has no auth
- * middleware on it (consistent with the rest of this router), so
- * ownership is checked explicitly here rather than assumed.
  */
 async function updateListing(req, res) {
   try {
     const { id } = req.params;
     const { farmerId, quantityKg, pricePerKg, harvestDate, qualityGrade, photos } = req.body;
 
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid listing id." });
+    }
     if (!farmerId) {
       return res.status(400).json({ success: false, message: "farmerId is required to verify ownership." });
+    }
+    if (quantityKg !== undefined && !isPositiveNumber(quantityKg)) {
+      return res.status(400).json({ success: false, message: "quantityKg must be a positive number." });
+    }
+    if (pricePerKg !== undefined && !isPositiveNumber(pricePerKg)) {
+      return res.status(400).json({ success: false, message: "pricePerKg must be a positive number." });
+    }
+    if (qualityGrade !== undefined && !VALID_GRADES.includes(qualityGrade)) {
+      return res.status(400).json({ success: false, message: "qualityGrade must be A, B or C." });
     }
 
     const listing = await MarketplaceListing.findById(id);
     if (!listing) {
       return res.status(404).json({ success: false, message: "Listing not found." });
     }
-    if (listing.farmer.toString() !== farmerId) {
+    if (listing.farmer.toString() !== String(farmerId)) {
       return res.status(403).json({ success: false, message: "You can only edit your own listings." });
     }
     if (listing.status !== "listed") {
@@ -113,21 +139,16 @@ async function updateListing(req, res) {
       });
     }
 
-    if (quantityKg !== undefined) listing.quantityKg = quantityKg;
+    if (quantityKg !== undefined) listing.quantityKg = Number(quantityKg);
     if (qualityGrade !== undefined) listing.qualityGrade = qualityGrade;
     if (harvestDate !== undefined) listing.harvestDate = harvestDate;
     if (photos !== undefined) listing.photos = photos;
 
-    // Editing price is deliberately farmer-controlled and independent of
-    // the automatic reject-markdown system: this sets BOTH the original
-    // and current price directly to whatever the farmer asks for, since
-    // an explicit edit means the farmer wants that to be the real price
-    // going forward, not a discount off some earlier number. If the
-    // listing later gets rejected, the markdown still applies as normal,
-    // calculated off this new original price.
+    // An explicit price edit becomes the new real price (not a discount off
+    // an earlier number), so the markdown history is reset.
     if (pricePerKg !== undefined) {
-      listing.originalPricePerKg = pricePerKg;
-      listing.currentPricePerKg = pricePerKg;
+      listing.originalPricePerKg = Number(pricePerKg);
+      listing.currentPricePerKg = Number(pricePerKg);
       listing.markdownPercentApplied = 0;
     }
 
@@ -143,64 +164,101 @@ async function updateListing(req, res) {
 /**
  * PATCH /api/marketplace/listings/:id/reject
  *
- * Core "Reject Redirection" mitigation logic:
- * When a primary B2B buyer rejects a listing, this automatically:
- *   1. Logs the rejection reason/defect type into rejectionHistory.
- *   2. Applies a markdown to currentPricePerKg (20% off original, stacking capped at 40%).
- *   3. Re-tiers the listing from "primary" to "secondary".
- *   4. Reassigns targetBuyerSegment to factories/restaurants/compost hubs.
- *   5. Resets status back to "listed" so it becomes visible on the secondary market feed.
+ * Core "Reject Redirection" mitigation logic. When a primary B2B buyer
+ * rejects produce, the listing is automatically:
+ *   1. logged with the rejection reason/defect,
+ *   2. marked down 20% (stacking, capped at 40% total),
+ *   3. moved from "primary" to "secondary" tier,
+ *   4. re-targeted to factories / restaurants / compost hubs,
+ *   5. re-opened as "listed" so it shows up on the secondary market feed.
+ *
+ * Guards added:
+ *   - a farmer cannot reject their own listing,
+ *   - sold / expired listings cannot be rejected,
+ *   - if someone has reserved it, only THAT buyer can reject it,
+ *   - the update is conditional, so two simultaneous rejections cannot
+ *     both apply a markdown to the same listing.
  */
 async function rejectAndRedirectListing(req, res) {
   try {
     const { id } = req.params;
     const { rejectedBy, reason, defectType } = req.body;
 
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid listing id." });
+    }
     if (!rejectedBy || !reason) {
       return res.status(400).json({
         success: false,
         message: "rejectedBy and reason are required to process a rejection.",
       });
     }
+    if (!isValidId(String(rejectedBy))) {
+      return res.status(400).json({ success: false, message: "rejectedBy is not a valid user id." });
+    }
 
     const listing = await MarketplaceListing.findById(id);
     if (!listing) {
       return res.status(404).json({ success: false, message: "Listing not found." });
     }
+    if (listing.farmer.toString() === String(rejectedBy)) {
+      return res.status(403).json({ success: false, message: "You cannot reject your own listing." });
+    }
+    if (!["listed", "reserved"].includes(listing.status)) {
+      return res.status(409).json({
+        success: false,
+        message: `This listing can no longer be rejected (status: ${listing.status}).`,
+      });
+    }
+    if (listing.status === "reserved" && listing.orderedBy && listing.orderedBy.toString() !== String(rejectedBy)) {
+      return res.status(403).json({ success: false, message: "This listing is reserved by another buyer." });
+    }
 
-    // 1. Log the rejection event
-    listing.rejectionHistory.push({
-      rejectedBy,
-      reason,
-      defectType: defectType || "other",
-      rejectedAt: new Date(),
-    });
-
-    // 2. Compute and apply markdown (cap total markdown at 40% to protect farmer income)
     const newMarkdownPercent = Math.min(
-      listing.markdownPercentApplied + SECONDARY_MARKUP_DOWN_PERCENT,
-      40
+      (listing.markdownPercentApplied || 0) + SECONDARY_MARKUP_DOWN_PERCENT,
+      MAX_TOTAL_MARKDOWN_PERCENT
     );
-    listing.markdownPercentApplied = newMarkdownPercent;
-    listing.currentPricePerKg =
-      Math.round(listing.originalPricePerKg * (1 - newMarkdownPercent / 100) * 100) / 100;
+    const newPrice = Math.round(listing.originalPricePerKg * (1 - newMarkdownPercent / 100) * 100) / 100;
 
-    // 3. Re-tier to secondary market
-    listing.tier = "secondary";
+    // Conditional update: only applies if nobody changed the listing since we read it.
+    const updated = await MarketplaceListing.findOneAndUpdate(
+      {
+        _id: id,
+        status: listing.status,
+        markdownPercentApplied: listing.markdownPercentApplied || 0,
+      },
+      {
+        $push: {
+          rejectionHistory: {
+            rejectedBy,
+            reason,
+            defectType: defectType || "other",
+            rejectedAt: new Date(),
+          },
+        },
+        $set: {
+          markdownPercentApplied: newMarkdownPercent,
+          currentPricePerKg: newPrice,
+          tier: "secondary",
+          targetBuyerSegment: SECONDARY_SEGMENTS,
+          status: "listed",
+        },
+        $unset: { orderedBy: "" },
+      },
+      { new: true, runValidators: true }
+    );
 
-    // 4. Reassign target buyer segment to secondary-market participants
-    listing.targetBuyerSegment = SECONDARY_SEGMENTS;
-
-    // 5. Re-open listing for secondary market visibility
-    listing.status = "listed";
-    listing.orderedBy = undefined;
-
-    await listing.save();
+    if (!updated) {
+      return res.status(409).json({
+        success: false,
+        message: "This listing was just changed by someone else. Please refresh and try again.",
+      });
+    }
 
     return res.status(200).json({
       success: true,
       message: "Listing rejected and automatically redirected to secondary market tier.",
-      data: listing,
+      data: updated,
     });
   } catch (error) {
     console.error("rejectAndRedirectListing error:", error);
@@ -210,32 +268,41 @@ async function rejectAndRedirectListing(req, res) {
 
 /**
  * PATCH /api/marketplace/listings/:id/confirm-order
- * Buyer confirms purchase of a listing (primary or secondary tier).
- * This RESERVES the listing — it does not yet count as a completed sale.
- * See completeSale() for the step that actually finalizes it.
+ * Buyer reserves a listing. Done as ONE atomic database operation
+ * ("reserve it only if it is still listed"), so two buyers tapping
+ * Confirm at the same moment can never both get the same produce.
  */
 async function confirmOrder(req, res) {
   try {
     const { id } = req.params;
     const { buyerId } = req.body;
 
-    if (!buyerId) {
-      return res.status(400).json({ success: false, message: "buyerId is required." });
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid listing id." });
+    }
+    if (!buyerId || !isValidId(String(buyerId))) {
+      return res.status(400).json({ success: false, message: "A valid buyerId is required." });
     }
 
+    const reserved = await MarketplaceListing.findOneAndUpdate(
+      { _id: id, status: "listed", farmer: { $ne: buyerId } },
+      { $set: { status: "reserved", orderedBy: buyerId } },
+      { new: true }
+    );
+
+    if (reserved) {
+      return res.status(200).json({ success: true, data: reserved });
+    }
+
+    // Nothing was updated — work out why so the message is accurate.
     const listing = await MarketplaceListing.findById(id);
     if (!listing) {
       return res.status(404).json({ success: false, message: "Listing not found." });
     }
-    if (listing.status !== "listed") {
-      return res.status(409).json({ success: false, message: `Listing is not available (status: ${listing.status}).` });
+    if (listing.farmer.toString() === String(buyerId)) {
+      return res.status(403).json({ success: false, message: "You cannot buy your own listing." });
     }
-
-    listing.status = "reserved";
-    listing.orderedBy = buyerId;
-    await listing.save();
-
-    return res.status(200).json({ success: true, data: listing });
+    return res.status(409).json({ success: false, message: `Listing is not available (status: ${listing.status}).` });
   } catch (error) {
     console.error("confirmOrder error:", error);
     return res.status(500).json({ success: false, message: "Failed to confirm order.", error: error.message });
@@ -244,35 +311,20 @@ async function confirmOrder(req, res) {
 
 /**
  * PATCH /api/marketplace/listings/:id/complete-sale
- *
- * IMPORTANT — this endpoint fixes a real bug: without a "reserved" ->
- * "sold" transition existing ANYWHERE in the app, no listing could ever
- * reach status "sold". Two things silently broke as a result:
- *   1. AI price prediction (utils/pricePredictionEngine.js) bases its
- *      estimate on the average of recently SOLD listings — with zero
- *      sold listings ever existing, it always fell back to a flat
- *      LKR 100 baseline, regardless of crop.
- *   2. The admin dashboard's "Gross Marketplace Value" metric
- *      (controllers/adminController.js) sums currentPricePerKg *
- *      quantityKg for status: "sold" listings — always LKR 0.
- *
- * Either the buyer or the farmer can call this once a reserved order has
- * actually been paid for / handed over — there's no payment gateway
- * behind this yet (matching the rest of this prototype's honest scope),
- * so it's a manual confirmation step, not an automatic one triggered by
- * a real transaction.
- *
- * Body: { confirmedBy } — the user ID marking it complete, logged but
- * not restricted to farmer-only or buyer-only, since either party
- * reasonably needs to be able to close out a sale.
+ * Marks a reserved order as sold. Only the listing's farmer or the buyer
+ * who reserved it may do this (previously any user id was accepted).
+ * Body: { confirmedBy }
  */
 async function completeSale(req, res) {
   try {
     const { id } = req.params;
     const { confirmedBy } = req.body;
 
-    if (!confirmedBy) {
-      return res.status(400).json({ success: false, message: "confirmedBy is required." });
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid listing id." });
+    }
+    if (!confirmedBy || !isValidId(String(confirmedBy))) {
+      return res.status(400).json({ success: false, message: "A valid confirmedBy user id is required." });
     }
 
     const listing = await MarketplaceListing.findById(id);
@@ -286,11 +338,25 @@ async function completeSale(req, res) {
       });
     }
 
-    listing.status = "sold";
-    listing.soldAt = new Date();
-    await listing.save();
+    const isFarmer = listing.farmer.toString() === String(confirmedBy);
+    const isBuyer = listing.orderedBy && listing.orderedBy.toString() === String(confirmedBy);
+    if (!isFarmer && !isBuyer) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the farmer or the buyer of this order can complete the sale.",
+      });
+    }
 
-    return res.status(200).json({ success: true, message: "Sale completed.", data: listing });
+    const sold = await MarketplaceListing.findOneAndUpdate(
+      { _id: id, status: "reserved" },
+      { $set: { status: "sold", soldAt: new Date() } },
+      { new: true }
+    );
+    if (!sold) {
+      return res.status(409).json({ success: false, message: "This order was just updated. Please refresh." });
+    }
+
+    return res.status(200).json({ success: true, message: "Sale completed.", data: sold });
   } catch (error) {
     console.error("completeSale error:", error);
     return res.status(500).json({ success: false, message: "Failed to complete sale.", error: error.message });

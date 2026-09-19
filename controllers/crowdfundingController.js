@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const CrowdfundingCampaign = require("../models/CrowdfundingCampaign");
 const User = require("../models/User");
 
@@ -9,6 +10,16 @@ const User = require("../models/User");
  * review — crowdfunding/lending is a regulated financial activity in most
  * jurisdictions, including Sri Lanka.
  */
+
+const MAX_PLEDGE_RETRIES = 3;
+
+function isValidId(id) {
+  return typeof id === "string" && mongoose.isValidObjectId(id);
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
 
 /**
  * POST /api/crowdfunding/campaigns
@@ -24,15 +35,31 @@ async function createCampaign(req, res) {
         message: "farmer, timelineRef, cropType, description, fundingGoalLkr, returnPercentage, and deadline are required.",
       });
     }
+    if (!isValidId(String(farmer))) {
+      return res.status(400).json({ success: false, message: "farmer is not a valid user id." });
+    }
+
+    const goal = Number(fundingGoalLkr);
+    const returnPct = Number(returnPercentage);
+    if (!Number.isFinite(goal) || goal <= 0) {
+      return res.status(400).json({ success: false, message: "fundingGoalLkr must be a positive number." });
+    }
+    if (!Number.isFinite(returnPct) || returnPct < 0 || returnPct > 100) {
+      return res.status(400).json({ success: false, message: "returnPercentage must be between 0 and 100." });
+    }
+    const deadlineDate = new Date(deadline);
+    if (Number.isNaN(deadlineDate.getTime()) || deadlineDate <= new Date()) {
+      return res.status(400).json({ success: false, message: "The funding deadline (your expected harvest date) must be a valid date in the future." });
+    }
 
     const campaign = await CrowdfundingCampaign.create({
       farmer,
       timelineRef,
       cropType,
       description,
-      fundingGoalLkr,
-      returnPercentage,
-      deadline,
+      fundingGoalLkr: goal,
+      returnPercentage: returnPct,
+      deadline: deadlineDate,
       status: "open",
     });
 
@@ -74,6 +101,9 @@ async function getMyCampaigns(req, res) {
     if (!farmerId) {
       return res.status(400).json({ success: false, message: "farmerId is required." });
     }
+    if (!isValidId(farmerId)) {
+      return res.status(400).json({ success: false, message: "farmerId is not a valid id." });
+    }
     const campaigns = await CrowdfundingCampaign.find({ farmer: farmerId })
       .populate("pledges.investor", "fullName")
       .sort({ createdAt: -1 });
@@ -93,6 +123,9 @@ async function getMyInvestments(req, res) {
     const { investorId } = req.query;
     if (!investorId) {
       return res.status(400).json({ success: false, message: "investorId is required." });
+    }
+    if (!isValidId(investorId)) {
+      return res.status(400).json({ success: false, message: "investorId is not a valid id." });
     }
 
     const campaigns = await CrowdfundingCampaign.find({ "pledges.investor": investorId })
@@ -124,56 +157,79 @@ async function getMyInvestments(req, res) {
 /**
  * POST /api/crowdfunding/campaigns/:id/pledge
  * An urban consumer/investor pledges an amount toward a farmer's campaign.
- * Pledge is automatically capped at the remaining amount needed to hit the
- * goal (no overfunding). Reaching the goal flips status to "funded".
+ * The pledge is capped at the amount still needed (no overfunding), and
+ * reaching the goal flips status to "funded".
+ *
+ * RACE-CONDITION FIX: the old code read the campaign, did the maths in
+ * memory, then saved. Two investors pledging at the same moment would both
+ * read the same "amount raised" and the campaign could end up over its goal.
+ * Now the write only succeeds if the amount raised is STILL the value we
+ * read; if someone else pledged in between, we re-read and try again.
  */
 async function pledgeToCampaign(req, res) {
   try {
     const { id } = req.params;
     const { investor, amountLkr } = req.body;
 
-    if (!investor || !amountLkr || amountLkr <= 0) {
-      return res.status(400).json({ success: false, message: "investor and a positive amountLkr are required." });
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign id." });
+    }
+    const requested = Number(amountLkr);
+    if (!investor || !isValidId(String(investor)) || !Number.isFinite(requested) || requested <= 0) {
+      return res.status(400).json({ success: false, message: "A valid investor and a positive amountLkr are required." });
     }
 
-    const campaign = await CrowdfundingCampaign.findById(id);
-    if (!campaign) {
-      return res.status(404).json({ success: false, message: "Campaign not found." });
+    for (let attempt = 0; attempt < MAX_PLEDGE_RETRIES; attempt++) {
+      const campaign = await CrowdfundingCampaign.findById(id);
+      if (!campaign) {
+        return res.status(404).json({ success: false, message: "Campaign not found." });
+      }
+      if (campaign.farmer.toString() === String(investor)) {
+        return res.status(403).json({ success: false, message: "You cannot invest in your own campaign." });
+      }
+      if (campaign.status !== "open") {
+        return res.status(409).json({ success: false, message: `This campaign is no longer open (status: ${campaign.status}).` });
+      }
+      if (new Date(campaign.deadline) < new Date()) {
+        await CrowdfundingCampaign.updateOne({ _id: id, status: "open" }, { $set: { status: "failed" } });
+        return res.status(409).json({ success: false, message: "This campaign's funding deadline has passed." });
+      }
+
+      const remainingNeeded = round2(campaign.fundingGoalLkr - campaign.amountRaisedLkr);
+      if (remainingNeeded <= 0) {
+        return res.status(409).json({ success: false, message: "This campaign has already reached its goal." });
+      }
+
+      const actualPledgeAmount = round2(Math.min(requested, remainingNeeded));
+      const expectedReturnLkr = round2(actualPledgeAmount * (1 + campaign.returnPercentage / 100));
+      const newAmountRaised = round2(campaign.amountRaisedLkr + actualPledgeAmount);
+      const reachesGoal = newAmountRaised >= campaign.fundingGoalLkr;
+
+      const updated = await CrowdfundingCampaign.findOneAndUpdate(
+        { _id: id, status: "open", amountRaisedLkr: campaign.amountRaisedLkr },
+        {
+          $push: { pledges: { investor, amountLkr: actualPledgeAmount, expectedReturnLkr, status: "pledged" } },
+          $set: { amountRaisedLkr: newAmountRaised, status: reachesGoal ? "funded" : "open" },
+        },
+        { new: true }
+      );
+
+      if (updated) {
+        return res.status(200).json({
+          success: true,
+          message:
+            actualPledgeAmount < requested
+              ? `Campaign only needed LKR ${actualPledgeAmount} more to reach its goal — your pledge was capped accordingly.`
+              : "Pledge successful.",
+          data: updated,
+        });
+      }
+      // Someone else pledged between our read and write — loop and re-read.
     }
-    if (campaign.status !== "open") {
-      return res.status(409).json({ success: false, message: `This campaign is no longer open (status: ${campaign.status}).` });
-    }
-    if (new Date(campaign.deadline) < new Date()) {
-      campaign.status = "failed";
-      await campaign.save();
-      return res.status(409).json({ success: false, message: "This campaign's funding deadline has passed." });
-    }
 
-    const remainingNeeded = campaign.fundingGoalLkr - campaign.amountRaisedLkr;
-    const actualPledgeAmount = Math.min(amountLkr, remainingNeeded);
-    const expectedReturnLkr = Math.round(actualPledgeAmount * (1 + campaign.returnPercentage / 100) * 100) / 100;
-
-    campaign.pledges.push({
-      investor,
-      amountLkr: actualPledgeAmount,
-      expectedReturnLkr,
-      status: "pledged",
-    });
-    campaign.amountRaisedLkr += actualPledgeAmount;
-
-    if (campaign.amountRaisedLkr >= campaign.fundingGoalLkr) {
-      campaign.status = "funded";
-    }
-
-    await campaign.save();
-
-    return res.status(200).json({
-      success: true,
-      message:
-        actualPledgeAmount < amountLkr
-          ? `Campaign only needed LKR ${actualPledgeAmount} more to reach its goal — your pledge was capped accordingly.`
-          : "Pledge successful.",
-      data: campaign,
+    return res.status(409).json({
+      success: false,
+      message: "This campaign is receiving many pledges right now. Please try again.",
     });
   } catch (error) {
     console.error("pledgeToCampaign error:", error);
@@ -185,29 +241,35 @@ async function pledgeToCampaign(req, res) {
  * PATCH /api/crowdfunding/campaigns/:id/repay
  * Called once the farmer's harvest sells and they can repay investors.
  * Marks the campaign and all its pledges as repaid, and nudges the
- * farmer's alternative credit score upward for a successfully completed
- * funding cycle — this feeds the "unlock micro-loans" credit system.
+ * farmer's alternative credit score upward.
+ *
+ * DOUBLE-REWARD FIX: the status change "funded" -> "repaid" is now a single
+ * atomic operation, so two quick taps (or two devices) cannot both succeed
+ * and award the credit-score bonus twice.
  */
 async function repayCampaign(req, res) {
   try {
     const { id } = req.params;
 
-    const campaign = await CrowdfundingCampaign.findById(id);
-    if (!campaign) {
-      return res.status(404).json({ success: false, message: "Campaign not found." });
-    }
-    if (campaign.status !== "funded") {
-      return res.status(409).json({ success: false, message: `Only fully-funded campaigns can be repaid (status: ${campaign.status}).` });
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign id." });
     }
 
-    campaign.pledges.forEach((p) => {
-      p.status = "repaid";
-    });
-    campaign.status = "repaid";
-    await campaign.save();
+    const campaign = await CrowdfundingCampaign.findOneAndUpdate(
+      { _id: id, status: "funded" },
+      { $set: { status: "repaid", "pledges.$[].status": "repaid" } },
+      { new: true }
+    );
+
+    if (!campaign) {
+      const existing = await CrowdfundingCampaign.findById(id);
+      if (!existing) {
+        return res.status(404).json({ success: false, message: "Campaign not found." });
+      }
+      return res.status(409).json({ success: false, message: `Only fully-funded campaigns can be repaid (status: ${existing.status}).` });
+    }
 
     // Reward successful repayment: +1 completed timeline, +25 credit score (capped at 1000).
-    // This feeds the "alternative credit scoring" system used to unlock micro-loans.
     await User.findByIdAndUpdate(campaign.farmer, [
       {
         $set: {
@@ -219,7 +281,7 @@ async function repayCampaign(req, res) {
       },
     ]);
 
-    const totalRepaidLkr = campaign.pledges.reduce((sum, p) => sum + p.expectedReturnLkr, 0);
+    const totalRepaidLkr = round2(campaign.pledges.reduce((sum, p) => sum + p.expectedReturnLkr, 0));
 
     return res.status(200).json({
       success: true,
