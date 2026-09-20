@@ -45,7 +45,7 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(requestLogger);
 // A safety net against abuse (each server copy counts separately). Raise it with RATE_LIMIT_GENERAL if real users hit it.
-app.use("/api", limiter({ windowMs: 60 * 1000, max: parseInt(process.env.RATE_LIMIT_GENERAL || "600", 10) }));
+app.use("/api", limiter({ windowMs: 60 * 1000, max: parseInt(process.env.RATE_LIMIT_GENERAL || "1500", 10) }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
 
