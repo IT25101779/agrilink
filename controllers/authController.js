@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const User = require("../models/User");
 const { sendPasswordResetOtp } = require("../utils/emailService");
+const { ensureReferralCode } = require("./accountController");
 
 const ALLOWED_ROLES = ["farmer", "driver", "buyer", "admin"];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -104,6 +105,7 @@ async function register(req, res) {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
+    const referrer = typeof req.body.referralCode === "string" && req.body.referralCode.trim() ? await User.findOne({ referralCode: req.body.referralCode.trim().toUpperCase() }).select("_id") : null;
     const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
       return res.status(409).json({ success: false, message: "An account with this email already exists." });
@@ -117,11 +119,13 @@ async function register(req, res) {
       phone: String(phone).trim(),
       passwordHash,
       role,
+      ...(referrer ? { referredBy: referrer._id } : {}),
       farmerProfile: role === "farmer" ? pickFarmerProfile(farmerProfile) : undefined,
       buyerProfile: role === "buyer" ? pickBuyerProfile(buyerProfile) : undefined,
       driverProfile: role === "driver" ? pickDriverProfile(driverProfile) : undefined,
     });
 
+    await ensureReferralCode(user);
     const token = generateToken(user._id, user.role);
 
     return res.status(201).json({

@@ -1,18 +1,31 @@
 const express = require("express");
 const router = express.Router();
+const { limiter, loginGuard: makeLoginGuard } = require("../middleware/rateLimit");
+const loginGuard = makeLoginGuard({ max: parseInt(process.env.LOGIN_MAX_FAILS || "8", 10) });
 const { register, login, getCurrentUser, forgotPassword, resetPassword } = require("../controllers/authController");
 const profile = require("../controllers/profileController");
+const account = require("../controllers/accountController");
+const safety = require("../controllers/safetyController");
 const { protect } = require("../middleware/authMiddleware");
 
 router.post("/register", register);
-router.post("/login", login);
+router.post("/login", loginGuard.check, login);
 router.get("/me", protect, getCurrentUser);
 router.patch("/me", protect, profile.updateMe);
 router.put("/me/avatar", protect, profile.setAvatar);
 router.delete("/me/avatar", protect, profile.removeAvatar);
 router.get("/avatar/:userId", protect, profile.getAvatar);
 router.post("/change-password", protect, profile.changePassword);
-router.post("/forgot-password", forgotPassword);
+router.post("/consent", protect, account.consent);
+router.get("/export", protect, account.exportData);
+router.post("/delete-account", protect, account.deleteAccount);
+router.get("/referrals", protect, account.referrals);
+router.post("/verification", protect, safety.submitVerification);
+router.get("/me/payment", protect, safety.getPayment);
+router.put("/me/payment", protect, safety.setPayment);
+router.put("/me/payment/qr", protect, safety.setPaymentQr);
+router.delete("/me/payment/qr", protect, safety.removePaymentQr);
+router.post("/forgot-password", limiter({ windowMs: 60 * 60 * 1000, max: parseInt(process.env.RATE_LIMIT_FORGOT || "10", 10), message: "Too many reset requests. Please try again in an hour." }), forgotPassword);
 router.post("/reset-password", resetPassword);
 
 module.exports = router;

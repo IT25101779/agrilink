@@ -4,13 +4,14 @@ const mongoose = require("mongoose");
 const MarketPriceSchema = new mongoose.Schema(
   {
     cropType: { type: String, required: true },
-    market: { type: String, enum: ["Dambulla", "Manning", "Pettah", "Kandy", "Jaffna", "Meegoda"], required: true },
+    market: { type: String, enum: ["Dambulla", "Manning", "Pettah", "Kandy", "Jaffna", "Meegoda", "Narahenpita", "Thambuttegama"], required: true },
     pricePerKg: { type: Number, required: true, min: 0.5, max: 10000 },
     day: { type: String, required: true }, // YYYY-MM-DD
     source: { type: String, enum: ["admin", "farmer"], default: "admin" },
     verified: { type: Boolean, default: false },
     reporter: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     isDemo: { type: Boolean, default: false },
+    clientId: { type: String, default: "" },
   },
   { timestamps: true }
 );

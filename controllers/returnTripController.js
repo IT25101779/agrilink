@@ -5,6 +5,7 @@ const { canonicalDistrict } = require("../utils/chatConfig");
 const { estimateDelivery } = require("../utils/deliveryEstimate");
 const { notifyFarmer } = require("../utils/notify");
 const { computeTrust } = require("../utils/trust");
+const Block = require("../models/Block");
 
 const HUBS = ["Dambulla", "Colombo_Manning_Market", "Pettah", "Kandy", "Jaffna", "Other"];
 
@@ -120,6 +121,7 @@ async function book(req, res) {
     if (!trip || trip.status !== "open" || trip.departAt.getTime() < Date.now() - 3600000) return fail(res, 404, "This trip is no longer available.");
     const kg = Number((req.body || {}).weightKg);
     if (!Number.isFinite(kg) || kg < 5) return fail(res, 400, "Enter at least 5 kg.");
+    if (await Block.exists({ $or: [{ blocker: trip.driver, blocked: req.userId }, { blocker: req.userId, blocked: trip.driver }] })) return fail(res, 403, "You can't book this driver.", "blocked");
     if (trip.bookings.some((b) => String(b.farmer) === String(req.userId) && ["requested", "confirmed"].includes(b.status))) return fail(res, 409, "You already have a booking on this trip.", "duplicate");
     if (kg > trip.availableKg - committedKg(trip)) return fail(res, 409, "Not enough space left on this trip.", "full");
     trip.bookings.push({ farmer: req.userId, weightKg: Math.round(kg), cropType: String((req.body || {}).cropType || "").slice(0, 40) });

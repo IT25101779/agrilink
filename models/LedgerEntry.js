@@ -10,6 +10,7 @@ const LedgerEntrySchema = new mongoose.Schema(
     amountLkr: { type: Number, required: true, min: 1 },
     note: { type: String, default: "", maxlength: 120 },
     date: { type: Date, required: true },
+    clientId: { type: String, default: "" }, // lets a phone retry a save safely after being offline
     orderRef: { type: mongoose.Schema.Types.ObjectId, ref: "TradeOrder" }, // set when an AgriLink sale wrote this line
   },
   { timestamps: true }

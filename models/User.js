@@ -9,7 +9,7 @@ const UserSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     role: {
       type: String,
-      enum: ["farmer", "driver", "buyer", "admin"],
+      enum: ["farmer", "driver", "buyer", "admin", "officer"],
       required: true,
       default: "farmer",
     },
@@ -59,6 +59,24 @@ const UserSchema = new mongoose.Schema(
     chatBannedUntil: { type: Date },
     // Changes whenever the profile picture changes, so apps know when to re-download it.
     avatarUpdatedAt: { type: Date },
+    // Privacy: which version of the privacy notice this person accepted, and when.
+    consentAcceptedAt: { type: Date },
+    consentVersion: { type: String, default: "" },
+    // Referral: every account gets a short code; new accounts can say who brought them.
+    referralCode: { type: String, index: true, sparse: true },
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // Optional SMS alerts (only sent when a gateway is configured; capped per month).
+    smsAlerts: { type: Boolean, default: false },
+    // ID / business check. The document photo is deleted as soon as the admin decides.
+    verification: {
+      status: { type: String, enum: ["none", "pending", "verified", "rejected"], default: "none" },
+      docType: { type: String, enum: ["nic", "business_reg", "farmer_card", ""], default: "" },
+      submittedAt: { type: Date },
+      decidedAt: { type: Date },
+      note: { type: String, default: "" },
+    },
+    // Agriculture officers see disease reports and answer questions for these districts.
+    officerProfile: { districts: { type: [String], default: [] }, title: { type: String, default: "" } },
   },
   { timestamps: true }
 );

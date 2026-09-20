@@ -1,4 +1,5 @@
 require("dotenv").config();
+const mongoose = require("mongoose");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -30,6 +31,11 @@ const surveyRoutes = require("./routes/surveys");
 const ledgerRoutes = require("./routes/ledger");
 const priceRoutes = require("./routes/prices");
 const returnTripRoutes = require("./routes/returnTrips");
+const safetyRoutes = require("./routes/safety");
+const recordsRoutes = require("./routes/records");
+const helpRoutes = require("./routes/help");
+const publicRoutes = require("./routes/public");
+const { limiter, requestLogger } = require("./middleware/rateLimit");
 
 const app = express();
 
@@ -37,6 +43,9 @@ const app = express();
 // app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+app.use(requestLogger);
+// A safety net against abuse (each server copy counts separately). Raise it with RATE_LIMIT_GENERAL if real users hit it.
+app.use("/api", limiter({ windowMs: 60 * 1000, max: parseInt(process.env.RATE_LIMIT_GENERAL || "600", 10) }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
 
@@ -55,7 +64,8 @@ app.use(async (req, res, next) => {
 
 // ---- Health check ----
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ success: true, message: "AgriLink AI 2.0 backend is running." });
+  const dbUp = mongoose.connection.readyState === 1;
+  res.status(dbUp ? 200 : 503).json({ success: dbUp, message: dbUp ? "AgriLink AI 2.0 backend is running." : "The database is not connected.", database: dbUp ? "connected" : "problem", uptimeSeconds: Math.round(process.uptime()) });
 });
 
 // ---- Feature routes ----
@@ -84,6 +94,11 @@ app.use("/api/surveys", surveyRoutes);
 app.use("/api/ledger", ledgerRoutes);
 app.use("/api/prices", priceRoutes);
 app.use("/api/return-trips", returnTripRoutes);
+app.use("/api/records", recordsRoutes.publicRouter);
+app.use("/api/records", recordsRoutes.router);
+app.use("/api/help", helpRoutes);
+app.use("/api", publicRoutes);
+app.use("/api", safetyRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {

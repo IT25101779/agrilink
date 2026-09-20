@@ -8,6 +8,9 @@ const User = require("../models/User");
 const { computeFreshness } = require("../utils/shelfLife");
 const { computeTrust } = require("../utils/trust");
 const { notifyFarmer } = require("../utils/notify");
+const PaymentProfile = require("../models/PaymentProfile");
+const Photo = require("../models/Photo");
+const Block = require("../models/Block");
 
 const MAX_CODE_ATTEMPTS = 5;
 
@@ -48,6 +51,10 @@ async function releaseListing(order) {
 async function shapeOrders(orders, viewerId) {
   const ids = orders.flatMap((o) => [o.farmer._id || o.farmer, o.buyer._id || o.buyer]);
   const trust = await computeTrust(ids);
+  const farmerIds = [...new Set(orders.map((o) => String(o.farmer._id || o.farmer)))];
+  const [payProfiles, qrPhotos] = await Promise.all([PaymentProfile.find({ user: { $in: farmerIds } }).lean(), Photo.find({ owner: { $in: farmerIds }, purpose: "payment_qr" }).select("owner").lean()]);
+  const payOf = new Map(payProfiles.map((p) => [String(p.user), p.instructions]));
+  const qrOf = new Map(qrPhotos.map((p) => [String(p.owner), String(p._id)]));
   const myRatings = await Rating.find({ order: { $in: orders.map((o) => o._id) }, rater: viewerId }).select("order stars").lean();
   const ratedMap = new Map(myRatings.map((r) => [String(r.order), r.stars]));
   return orders.map((o) => {
@@ -82,6 +89,11 @@ async function shapeOrders(orders, viewerId) {
       myRating: ratedMap.get(String(o._id)) || null,
     };
     // Only the BUYER ever sees the delivery code, and only while the goods are on the way.
+    // The buyer sees HOW to pay the farmer once the goods are on the way.
+    if (!isFarmer && ["dispatched", "delivered"].includes(o.status)) {
+      const fid = String(o.farmer._id || o.farmer);
+      data.farmerPayment = { instructions: payOf.get(fid) || "", qrPhotoId: qrOf.get(fid) || null };
+    }
     if (!isFarmer && o.status === "dispatched" && o.delivery && o.delivery.codeSalt) data.deliveryCode = deliveryCodeFor(o._id, o.delivery.codeSalt);
     return data;
   });
@@ -95,6 +107,7 @@ async function placeOrder(req, res) {
     const listing = await MarketplaceListing.findById(req.body.listingId);
     if (!listing || listing.status !== "listed") return fail(res, 409, "This listing is no longer available.", "unavailable");
     if (String(listing.farmer) === String(req.userId)) return fail(res, 400, "You can't order your own listing.");
+    if (await Block.exists({ $or: [{ blocker: listing.farmer, blocked: req.userId }, { blocker: req.userId, blocked: listing.farmer }] })) return fail(res, 403, "You can't order from this seller.", "blocked");
     const freshness = computeFreshness(listing);
     if (freshness.expired) return fail(res, 409, "This produce is past its freshness window.", "expired");
 

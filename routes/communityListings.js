@@ -10,12 +10,14 @@ const {
   adminDeleteListing,
 } = require("../controllers/communityListingController");
 const { protect, requireRole } = require("../middleware/authMiddleware");
+const { bindIdentity, ownerOf } = require("../middleware/identity");
+const CommunityListing = require("../models/CommunityListing");
 
-router.post("/", createListing);
-router.get("/nearby", getNearbyListings);
-router.get("/mine", getMyListings);
-router.patch("/:id", updateListing);
-router.delete("/:id", deleteListing);
+router.post("/", protect, bindIdentity, createListing);
+router.get("/nearby", protect, getNearbyListings);
+router.get("/mine", protect, bindIdentity, getMyListings);
+router.patch("/:id", protect, bindIdentity, ownerOf(CommunityListing, "farmer"), updateListing);
+router.delete("/:id", protect, bindIdentity, ownerOf(CommunityListing, "farmer"), deleteListing);
 
 // Admin oversight/moderation
 router.get("/", protect, requireRole("admin"), getAllListings);

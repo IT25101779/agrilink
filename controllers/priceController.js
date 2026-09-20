@@ -6,7 +6,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const { canonicalCrop } = require("../utils/chatConfig");
 const { notifyFarmer } = require("../utils/notify");
 
-const MARKETS = ["Dambulla", "Manning", "Pettah", "Kandy", "Jaffna", "Meegoda"];
+const MARKETS = ["Dambulla", "Manning", "Pettah", "Kandy", "Jaffna", "Meegoda", "Narahenpita", "Thambuttegama"];
 const SHOCK_PERCENT = 15;
 const MAX_ALERTS = 10;
 const MAX_REPORTS_PER_DAY = 10;
@@ -85,12 +85,14 @@ async function report(req, res) {
     if (!MARKETS.includes(b.market)) return fail(res, 400, "Unknown market.");
     const price = Number(b.pricePerKg);
     if (!Number.isFinite(price) || price < 1 || price > 5000) return fail(res, 400, "Enter a price between 1 and 5,000.");
+    const clientId = String(b.clientId || "").slice(0, 40);
+    if (clientId && (await MarketPrice.exists({ reporter: req.userId, clientId }))) return res.status(200).json({ success: true, duplicate: true, message: "Thanks! Your report helps other farmers." });
     const already = await MarketPrice.countDocuments({ reporter: req.userId, day: today() });
     if (already >= MAX_REPORTS_PER_DAY) return fail(res, 429, "You've reported enough for today. Thank you!", "rate_limited");
     // A wild guess next to the official price is ignored, so nobody can spoil the board.
     const official = await MarketPrice.findOne({ cropType: crop, market: b.market, verified: true }).sort({ day: -1 }).lean();
     if (official && (price > official.pricePerKg * 3 || price < official.pricePerKg / 3)) return fail(res, 400, "That price looks far from today's market price. Please check it.", "implausible");
-    await MarketPrice.create({ cropType: crop, market: b.market, pricePerKg: price, day: today(), source: "farmer", verified: false, reporter: req.userId });
+    await MarketPrice.create({ cropType: crop, market: b.market, pricePerKg: price, day: today(), source: "farmer", verified: false, reporter: req.userId, clientId });
     return res.status(201).json({ success: true, message: "Thanks! Your report helps other farmers." });
   } catch (error) {
     console.error("report error:", error);

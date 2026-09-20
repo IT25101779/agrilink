@@ -62,6 +62,21 @@ const ReturnTrip = require("../models/ReturnTrip");
 const Survey = require("../models/Survey");
 const SurveyResponse = require("../models/SurveyResponse");
 const ProfileImage = require("../models/ProfileImage");
+const WildlifeSighting = require("../models/WildlifeSighting");
+const Question = require("../models/Question");
+const YieldRecord = require("../models/YieldRecord");
+const SubsidyRecord = require("../models/SubsidyRecord");
+const DamageReport = require("../models/DamageReport");
+const Photo = require("../models/Photo");
+const PaymentProfile = require("../models/PaymentProfile");
+const Dispute = require("../models/Dispute");
+const UserReport = require("../models/UserReport");
+const Block = require("../models/Block");
+const Feedback = require("../models/Feedback");
+const DeviceToken = require("../models/DeviceToken");
+const SmsLog = require("../models/SmsLog");
+const AgriOffice = require("../models/AgriOffice");
+const SupportPrice = require("../models/SupportPrice");
 const DRIVER_EMAIL = "demo.driver@agrilink.lk";
 const DEMO_AD_BRANDS = ["Lanka Fuel Card", "Ceylon Tyre Mart", "AgroSure Crop Insurance", "Kandy Cold Store", "GreenGrow Seeds"];
 
@@ -124,6 +139,19 @@ async function main() {
     await SurveyResponse.deleteMany({ respondent: { $in: previousIds } });
     await ProfileImage.deleteMany({ user: { $in: previousIds } });
     await MarketPrice.deleteMany({ reporter: { $in: previousIds } });
+    await WildlifeSighting.deleteMany({ reporter: { $in: previousIds } });
+    await Question.deleteMany({ farmer: { $in: previousIds } });
+    await YieldRecord.deleteMany({ farmer: { $in: previousIds } });
+    await SubsidyRecord.deleteMany({ farmer: { $in: previousIds } });
+    await DamageReport.deleteMany({ farmer: { $in: previousIds } });
+    await Photo.deleteMany({ owner: { $in: previousIds } });
+    await PaymentProfile.deleteMany({ user: { $in: previousIds } });
+    await Dispute.deleteMany({ $or: [{ openedBy: { $in: previousIds } }, { against: { $in: previousIds } }] });
+    await UserReport.deleteMany({ $or: [{ reporter: { $in: previousIds } }, { reported: { $in: previousIds } }] });
+    await Block.deleteMany({ $or: [{ blocker: { $in: previousIds } }, { blocked: { $in: previousIds } }] });
+    await Feedback.deleteMany({ user: { $in: previousIds } });
+    await DeviceToken.deleteMany({ user: { $in: previousIds } });
+    await SmsLog.deleteMany({ user: { $in: previousIds } });
     await GroupMessage.deleteMany({ sender: { $in: previousIds } });
     await GroupMessage.deleteMany({ type: "system" }); // outbreak alerts from earlier demos
     await ChatMedia.deleteMany({ uploader: { $in: previousIds } });
@@ -544,6 +572,15 @@ async function main() {
   // The demo farmer's money book for a tomato season
   const ledger = [["expense", "seeds", 18500, 78, "Hybrid tomato seed"], ["expense", "fertilizer", 24000, 70, "Base + top-dress fertilizer"], ["expense", "labour", 42000, 60, "Planting and weeding"], ["expense", "pesticide", 9200, 40, "Blight spray x2"], ["expense", "transport", 6500, 12, "Truck to Dambulla"], ["expense", "water", 5200, 30, "Irrigation pump fuel"], ["income", "sale", 168000, 8, "Sold to Green Basket Hotels"], ["expense", "labour", 15000, 45, "Harvest labour"]];
   await LedgerEntry.insertMany(ledger.map(([type, category, amountLkr, ago, note]) => ({ farmer: farmer._id, cropType: "Tomato", type, category, amountLkr, note, date: daysAgo(ago) })));
+  // Agriculture offices: SAMPLE rows only (clearly labelled). Replace them with real details from the admin website.
+  await AgriOffice.deleteMany({ isSample: true });
+  await AgriOffice.create([
+    { name: "Sample Agrarian Service Centre", kind: "agrarian_service_centre", district: "Kandy", phone: "", address: "Replace with the real address", hours: "Mon-Fri 8:30-4:15", isSample: true },
+    { name: "Sample Agriculture Extension Officer", kind: "extension_officer", district: "Kandy", phone: "", address: "Replace with the real details", isSample: true },
+    { name: "Sample Cooperative Society", kind: "cooperative", district: "Matale", phone: "", address: "Replace with the real details", isSample: true },
+  ]);
+  await SupportPrice.deleteMany({ source: "Sample - replace with the official notice" });
+  await YieldRecord.insertMany([{ farmer: farmer._id, cropType: "Tomato", season: "maha", year: new Date().getFullYear() - 1, acres: 2, harvestKg: 9000, district: "Kandy" }, { farmer: farmer._id, cropType: "Carrot", season: "yala", year: new Date().getFullYear() - 1, acres: 1, harvestKg: 6500, district: "Kandy" }]);
   console.log("Created demo ads, prices, surveys, trust history, return trips and a farm ledger.");
 
   console.log("\nDONE. Demo logins:");

@@ -24,7 +24,10 @@ async function addEntry(req, res) {
     if (isNaN(date) || date.getTime() > Date.now() + 86400000 || date.getTime() < Date.now() - 3 * 365 * 86400000) return fail(res, 400, "That date doesn't look right.");
     const crop = b.cropType && b.cropType !== "General" ? canonicalCrop(b.cropType) : null;
     if (b.cropType && b.cropType !== "General" && !crop) return fail(res, 400, "Unknown crop.");
-    const entry = await LedgerEntry.create({ farmer: req.userId, cropType: crop || "General", type: b.type, category, amountLkr: Math.round(amount), note: String(b.note || "").trim().slice(0, 120), date });
+    // A phone that was offline retries with the same clientId — save it only once.
+    const clientId = String(b.clientId || "").slice(0, 40);
+    if (clientId) { const dup = await LedgerEntry.findOne({ farmer: req.userId, clientId }); if (dup) return res.status(200).json({ success: true, duplicate: true, data: shape(dup) }); }
+    const entry = await LedgerEntry.create({ farmer: req.userId, cropType: crop || "General", type: b.type, category, amountLkr: Math.round(amount), note: String(b.note || "").trim().slice(0, 120), date, clientId });
     return res.status(201).json({ success: true, data: shape(entry) });
   } catch (error) {
     console.error("addEntry error:", error);

@@ -48,6 +48,7 @@ async function updateMe(req, res) {
       set.preferredLanguage = b.preferredLanguage;
     }
 
+    if (b.smsAlerts !== undefined) set.smsAlerts = b.smsAlerts === true;
     if (user.role === "farmer" && b.farmerProfile && typeof b.farmerProfile === "object") {
       const f = b.farmerProfile;
       if (f.district !== undefined) {
