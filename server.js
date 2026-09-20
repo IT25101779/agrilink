@@ -24,6 +24,12 @@ const passportRoutes = require("./routes/passport");
 const groupLotRoutes = require("./routes/groupLots");
 const demandRoutes = require("./routes/demand");
 const groupChatRoutes = require("./routes/groupChat");
+const orderRoutes = require("./routes/orders");
+const ratingRoutes = require("./routes/ratings");
+const surveyRoutes = require("./routes/surveys");
+const ledgerRoutes = require("./routes/ledger");
+const priceRoutes = require("./routes/prices");
+const returnTripRoutes = require("./routes/returnTrips");
 
 const app = express();
 
@@ -72,6 +78,12 @@ app.use("/api/passport", passportRoutes);
 app.use("/api/group-lots", groupLotRoutes);
 app.use("/api/demand", demandRoutes);
 app.use("/api/group-chat", groupChatRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/ratings", ratingRoutes);
+app.use("/api/surveys", surveyRoutes);
+app.use("/api/ledger", ledgerRoutes);
+app.use("/api/prices", priceRoutes);
+app.use("/api/return-trips", returnTripRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {

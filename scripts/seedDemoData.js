@@ -52,6 +52,18 @@ const GroupMessage = require("../models/GroupMessage");
 const ChatMedia = require("../models/ChatMedia");
 const ChatReport = require("../models/ChatReport");
 const { makeAlias } = require("../utils/chatConfig");
+const Advertisement = require("../models/Advertisement");
+const LedgerEntry = require("../models/LedgerEntry");
+const PriceAlert = require("../models/PriceAlert");
+const MarketPrice = require("../models/MarketPrice");
+const TradeOrder = require("../models/TradeOrder");
+const Rating = require("../models/Rating");
+const ReturnTrip = require("../models/ReturnTrip");
+const Survey = require("../models/Survey");
+const SurveyResponse = require("../models/SurveyResponse");
+const ProfileImage = require("../models/ProfileImage");
+const DRIVER_EMAIL = "demo.driver@agrilink.lk";
+const DEMO_AD_BRANDS = ["Lanka Fuel Card", "Ceylon Tyre Mart", "AgroSure Crop Insurance", "Kandy Cold Store", "GreenGrow Seeds"];
 
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD || "Demo@1234";
 const FARMER_EMAIL = "demo.farmer@agrilink.lk";
@@ -92,7 +104,7 @@ async function main() {
 
   // ---- 1. Clean out a previous run ----
   const previous = await User.find({
-    $or: [{ email: { $in: [FARMER_EMAIL, BUYER_EMAIL] } }, { email: { $regex: `${NEIGHBOUR_DOMAIN.replace(/\./g, "\\.")}$` } }],
+    $or: [{ email: { $in: [FARMER_EMAIL, BUYER_EMAIL, DRIVER_EMAIL] } }, { email: { $regex: `${NEIGHBOUR_DOMAIN.replace(/\./g, "\\.")}$` } }],
   }).select("_id");
   const previousIds = previous.map((u) => u._id);
   if (previousIds.length) {
@@ -104,6 +116,14 @@ async function main() {
     await DemandRequest.deleteMany({ buyer: { $in: previousIds } });
     await Reminder.deleteMany({ farmer: { $in: previousIds } });
     await GroupMembership.deleteMany({ user: { $in: previousIds } });
+    await LedgerEntry.deleteMany({ farmer: { $in: previousIds } });
+    await PriceAlert.deleteMany({ farmer: { $in: previousIds } });
+    await TradeOrder.deleteMany({ $or: [{ farmer: { $in: previousIds } }, { buyer: { $in: previousIds } }] });
+    await Rating.deleteMany({ $or: [{ rater: { $in: previousIds } }, { ratee: { $in: previousIds } }] });
+    await ReturnTrip.deleteMany({ driver: { $in: previousIds } });
+    await SurveyResponse.deleteMany({ respondent: { $in: previousIds } });
+    await ProfileImage.deleteMany({ user: { $in: previousIds } });
+    await MarketPrice.deleteMany({ reporter: { $in: previousIds } });
     await GroupMessage.deleteMany({ sender: { $in: previousIds } });
     await GroupMessage.deleteMany({ type: "system" }); // outbreak alerts from earlier demos
     await ChatMedia.deleteMany({ uploader: { $in: previousIds } });
@@ -454,9 +474,82 @@ async function main() {
   await say(chatters.n8, "all", "Thanks for the reminder! Stay safe everyone.", 45);
   console.log("Created group chat conversations (English, Sinhala, Tamil).");
 
+  // ---- 11. Update 4 demo data: ads, prices, surveys, trust history, return trips, farm ledger ----
+  // (Demo ads/prices/surveys are credited to the demo buyer — the seed never creates an admin account with a known password.)
+  await Advertisement.deleteMany({ brandName: { $in: DEMO_AD_BRANDS } });
+  const adDefaults = { createdBy: buyer._id, scheduleStart: daysAgo(1), scheduleEnd: daysFromNow(90), isActive: true };
+  await Advertisement.create([
+    { ...adDefaults, brandName: "Lanka Fuel Card", category: "fuel", placements: ["logistics", "driver"], headline: "Save Rs. 8 on every litre of diesel", body: "Fuel discounts at 400+ stations for AgriLink truck drivers.", ctaLabel: "Get the card", emoji: "⛽", accentColor: "#B45309", clickThroughUrl: "https://example.com/lanka-fuel-card" },
+    { ...adDefaults, brandName: "Ceylon Tyre Mart", category: "tyres", placements: ["logistics", "driver"], headline: "Free tyre check before long hauls", body: "Book a 10-minute safety check at any Ceylon Tyre Mart.", ctaLabel: "Book a check", emoji: "🛞", accentColor: "#1D4ED8", clickThroughUrl: "https://example.com/ceylon-tyre-mart" },
+    { ...adDefaults, brandName: "AgroSure Crop Insurance", category: "insurance", placements: ["marketplace", "timeline"], headline: "Protect this season's harvest", body: "Rain or blight? Cover starts from Rs. 1,200 per acre.", ctaLabel: "Get a quote", emoji: "🛡️", accentColor: "#7C3AED", clickThroughUrl: "https://example.com/agrosure" },
+    { ...adDefaults, brandName: "Kandy Cold Store", category: "cold_storage", placements: ["logistics", "marketplace"], headline: "Cold storage from Rs. 3 per kg per day", body: "Keep tomatoes and beans fresh while you wait for the best price.", ctaLabel: "See rates", emoji: "❄️", accentColor: "#0E7490", clickThroughUrl: "https://example.com/kandy-cold-store" },
+    { ...adDefaults, brandName: "GreenGrow Seeds", category: "seeds", placements: ["timeline", "scanner"], headline: "Blight-resistant tomato seed", body: "Certified seed for the next season. Free delivery in Kandy.", ctaLabel: "Order seed", emoji: "🌱", accentColor: "#15803D", clickThroughUrl: "https://example.com/greengrow" },
+  ]);
+
+  // Official prices: 10 days of history at three markets, with a Tomato jump today at Dambulla
+  await MarketPrice.deleteMany({ isDemo: true });
+  const priceBase = { Tomato: 180, "Beans (Bush)": 320, Carrot: 240, Cabbage: 130, "Brinjal (Eggplant)": 210, Pumpkin: 95, Cucumber: 110, "Okra (Bandakka)": 260, "Bitter Gourd": 300, "Onion (Big/Red)": 220, Chili: 480, Banana: 150 };
+  const marketFactor = { Dambulla: 1, Manning: 1.12, Kandy: 1.06 };
+  const priceRows = [];
+  for (let d = 9; d >= 0; d--) {
+    const day = new Date(Date.now() - d * DAY).toISOString().slice(0, 10);
+    Object.entries(priceBase).forEach(([crop, base], ci) => Object.entries(marketFactor).forEach(([market, f]) => {
+      let price = base * f * (1 + 0.06 * Math.sin((d + ci) / 2.2));
+      if (crop === "Tomato" && market === "Dambulla" && d === 0) price = priceRows.filter((r) => r.cropType === "Tomato" && r.market === "Dambulla").slice(-1)[0].pricePerKg * 1.22;
+      priceRows.push({ cropType: crop, market, pricePerKg: Math.round(price), day, source: "admin", verified: true, reporter: buyer._id, isDemo: true });
+    }));
+  }
+  await MarketPrice.insertMany(priceRows);
+  await PriceAlert.create({ farmer: farmer._id, cropType: "Tomato", direction: "above", thresholdLkr: 200, market: "" });
+
+  // Surveys with demo answers from the neighbour farmers (clearly marked demo in the admin results)
+  const oldSurveys = await Survey.find({ isDemo: true }).select("_id");
+  if (oldSurveys.length) await SurveyResponse.deleteMany({ survey: { $in: oldSurveys.map((x) => x._id) } });
+  await Survey.deleteMany({ isDemo: true });
+  const lossSurvey = await Survey.create({ isDemo: true, createdBy: buyer._id, title: "Harvest losses & selling", intro: "Two minutes. Your answers help us build tools for farmers like you.", questions: [
+    { key: "q1", kind: "number", text: "About what percent of your last harvest was lost before it could be sold?", unit: "%", required: true },
+    { key: "q2", kind: "single", text: "What was the MAIN reason?", options: ["No buyer found in time", "Price too low", "Transport problem", "Spoiled before sale", "Pest or disease", "Other"], required: true },
+    { key: "q3", kind: "single", text: "How do you usually sell?", options: ["To a middleman at my farm", "At the market myself", "Through a cooperative", "Directly to a hotel or shop", "Other"], required: true },
+  ] });
+  await Survey.create({ isDemo: true, createdBy: buyer._id, title: "Would you use these tools?", intro: "Tell us what would actually help you.", questions: [
+    { key: "q1", kind: "scale", text: "How useful would selling together with neighbours (group lots) be? (1 = not at all, 5 = very)", required: true },
+    { key: "q2", kind: "scale", text: "How much would you trust a buyer who has good ratings? (1–5)", required: true },
+    { key: "q3", kind: "text", text: "What is the biggest problem we should solve next?", required: false },
+  ] });
+  const lossReasons = lossSurvey.questions[1].options, sellWays = lossSurvey.questions[2].options;
+  await SurveyResponse.insertMany(neighbours.map((f, i) => ({
+    survey: lossSurvey._id, respondent: f._id, district: f.farmerProfile.district,
+    answers: { q1: 8 + ((i * 7) % 24) + (f.farmerProfile.district === "Nuwara Eliya" ? 6 : 0), q2: lossReasons[(i * 3 + (i % 4 === 0 ? 1 : 0)) % lossReasons.length], q3: sellWays[(i * 5) % 3 === 0 ? 0 : (i % sellWays.length)] },
+  })));
+
+  // Trust history: completed & rated orders so badges are visible (recorded directly; the real flow is tested separately)
+  const mkPaid = async (farmerDoc, buyerDoc, crop, kg, price, stars, tags, farmerStars) => {
+    const order = await TradeOrder.create({ listing: new mongoose.Types.ObjectId(), farmer: farmerDoc._id, buyer: buyerDoc._id, cropType: crop, quantityKg: kg, pricePerKg: price, totalLkr: kg * price, status: "paid", events: [{ status: "paid", by: "farmer", at: daysAgo(3) }] });
+    await Rating.create({ order: order._id, rater: buyerDoc._id, ratee: farmerDoc._id, stars, tags });
+    if (farmerStars) await Rating.create({ order: order._id, rater: farmerDoc._id, ratee: buyerDoc._id, stars: farmerStars, tags: ["paid_promptly"] });
+  };
+  const trustFarmers = [n(9), n(10), n(11)];
+  for (let i = 0; i < 6; i++) await mkPaid(trustFarmers[0], i % 2 ? buyer2 : buyer, ["Tomato", "Carrot", "Beans (Bush)"][i % 3], 120 + i * 20, 170 + i * 5, i === 5 ? 4 : 5, ["on_time", "good_quality"], 5);
+  for (let i = 0; i < 3; i++) await mkPaid(trustFarmers[1], buyer, "Carrot", 90 + i * 10, 230, 4, ["fair_price"], i === 0 ? 4 : 0);
+  await mkPaid(trustFarmers[2], buyer2, "Carrot", 60, 240, 5, ["honest_weight"], 0);
+
+  // A demo truck driver with three return trips that are already posted
+  const driver = await User.create({ fullName: "Kumara Perera (Demo Driver)", email: DRIVER_EMAIL, phone: "+94771230000", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LB-4821", vehicleCapacityKg: 3000 } });
+  await ReturnTrip.create([
+    { driver: driver._id, vehicleRegistrationNo: "WP LB-4821", fromHub: "Colombo_Manning_Market", toDistrict: "Kandy", departAt: new Date(Date.now() + 18 * 3600000), availableKg: 900, pricePerKg: 11, regularPricePerKg: 20, note: "Empty after a Manning Market delivery — can pick up along the A1." },
+    { driver: driver._id, vehicleRegistrationNo: "WP LB-4821", fromHub: "Dambulla", toDistrict: "Nuwara Eliya", departAt: new Date(Date.now() + 40 * 3600000), availableKg: 700, pricePerKg: 14, regularPricePerKg: 24 },
+    { driver: driver._id, vehicleRegistrationNo: "WP LB-4821", fromHub: "Pettah", toDistrict: "Matale", departAt: new Date(Date.now() + 26 * 3600000), availableKg: 500, pricePerKg: 10, regularPricePerKg: 18 },
+  ]);
+
+  // The demo farmer's money book for a tomato season
+  const ledger = [["expense", "seeds", 18500, 78, "Hybrid tomato seed"], ["expense", "fertilizer", 24000, 70, "Base + top-dress fertilizer"], ["expense", "labour", 42000, 60, "Planting and weeding"], ["expense", "pesticide", 9200, 40, "Blight spray x2"], ["expense", "transport", 6500, 12, "Truck to Dambulla"], ["expense", "water", 5200, 30, "Irrigation pump fuel"], ["income", "sale", 168000, 8, "Sold to Green Basket Hotels"], ["expense", "labour", 15000, 45, "Harvest labour"]];
+  await LedgerEntry.insertMany(ledger.map(([type, category, amountLkr, ago, note]) => ({ farmer: farmer._id, cropType: "Tomato", type, category, amountLkr, note, date: daysAgo(ago) })));
+  console.log("Created demo ads, prices, surveys, trust history, return trips and a farm ledger.");
+
   console.log("\nDONE. Demo logins:");
   console.log(`  Farmer : ${FARMER_EMAIL} / ${DEMO_PASSWORD}`);
   console.log(`  Buyer  : ${BUYER_EMAIL} / ${DEMO_PASSWORD}`);
+  console.log(`  Driver : ${DRIVER_EMAIL} / ${DEMO_PASSWORD}`);
   console.log(`  (37 neighbour farmers and a second buyer were also created — they're only there to make the district data realistic.)`);
   await mongoose.disconnect();
 }

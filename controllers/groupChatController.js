@@ -132,6 +132,31 @@ async function suggestedGroups(req, res) {
   }
 }
 
+/** GET /api/group-chat/groups/directory — EVERY group (All Sri Lanka, 25 districts, all crops), so farmers can browse and join without typing filters. */
+async function directory(req, res) {
+  try {
+    const [memberships, recent] = await Promise.all([
+      GroupMembership.find({}).select("groupKey user").lean(),
+      GroupMessage.find({ status: "visible", createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } }).select("groupKey").lean(),
+    ]);
+    const members = new Map(), weekly = new Map(), mine = new Set();
+    memberships.forEach((m) => { members.set(m.groupKey, (members.get(m.groupKey) || 0) + 1); if (String(m.user) === String(req.userId)) mine.add(m.groupKey); });
+    recent.forEach((m) => weekly.set(m.groupKey, (weekly.get(m.groupKey) || 0) + 1));
+    const describe = (key) => ({ ...cfg.parseGroupKey(key), memberCount: members.get(key) || 0, messagesThisWeek: weekly.get(key) || 0, joined: mine.has(key) });
+    return res.status(200).json({
+      success: true,
+      data: {
+        all: describe("all"),
+        districts: cfg.DISTRICTS.map((d) => describe(`district:${d}`)),
+        crops: cfg.CROPS.map((c) => describe(`crop:${c}`)),
+      },
+    });
+  } catch (error) {
+    console.error("directory error:", error);
+    return fail(res, 500, "Failed to load the group directory.");
+  }
+}
+
 /** GET /api/group-chat/groups/search?district=&crop= — the groups a filter leads to, most specific first. */
 async function searchGroups(req, res) {
   try {
@@ -506,7 +531,7 @@ async function postOutbreakAlert({ farmerId, cropType, disease, count }) {
 }
 
 module.exports = {
-  listMyGroups, suggestedGroups, searchGroups, joinGroup, leaveGroup, setMuted, setBlocked,
+  listMyGroups, suggestedGroups, searchGroups, directory, joinGroup, leaveGroup, setMuted, setBlocked,
   getMessages, postMessage, toggleHelpful, reportMessage, deleteMyMessage, getMedia, translateMessage,
   postOutbreakAlert,
 };

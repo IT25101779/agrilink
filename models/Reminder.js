@@ -9,7 +9,7 @@ const ReminderSchema = new mongoose.Schema(
     cropType: { type: String, required: true },
     type: {
       type: String,
-      enum: ["weather_action", "disease_risk", "harvest_ready", "milestone_due", "price_alert"],
+      enum: ["weather_action", "disease_risk", "harvest_ready", "milestone_due", "price_alert", "order_update", "rating_request", "survey"],
       required: true,
     },
     title: { type: String, required: true },

@@ -9,6 +9,7 @@ router.use(protect, requireRole("farmer"));
 router.get("/groups", c.listMyGroups);
 router.get("/groups/suggested", c.suggestedGroups);
 router.get("/groups/search", c.searchGroups);
+router.get("/groups/directory", c.directory);
 router.post("/groups/join", c.joinGroup);
 router.post("/groups/leave", c.leaveGroup);
 router.post("/groups/mute", c.setMuted);

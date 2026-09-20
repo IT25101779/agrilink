@@ -57,6 +57,8 @@ const UserSchema = new mongoose.Schema(
     passportToken: { type: String, unique: true, sparse: true, select: false },
     // Set by an admin to stop someone posting in group chats until this date.
     chatBannedUntil: { type: Date },
+    // Changes whenever the profile picture changes, so apps know when to re-download it.
+    avatarUpdatedAt: { type: Date },
   },
   { timestamps: true }
 );
