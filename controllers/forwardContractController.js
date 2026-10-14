@@ -66,9 +66,15 @@ async function listContracts(req, res) {
   }
 }
 
-/** GET /api/forward-contracts/mine — the buyer's own posted contracts. */
+/** GET /api/forward-contracts/mine — the buyer's own posted contracts.
+ * Commitments' farmer is populated with phone so the buyer-web "contracts"
+ * tab can offer a tappable "Call" link before confirming — the same
+ * phone-first pattern as crowdfunding and logistics bookings. */
 async function getMyContracts(req, res) {
-  const contracts = await ForwardContract.find({ buyer: req.userId }).sort({ createdAt: -1 }).lean();
+  const contracts = await ForwardContract.find({ buyer: req.userId })
+    .populate("commitments.farmer", "fullName phone farmerProfile.district")
+    .sort({ createdAt: -1 })
+    .lean();
   return res.status(200).json({ success: true, data: contracts });
 }
 

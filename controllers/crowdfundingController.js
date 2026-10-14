@@ -145,7 +145,7 @@ async function getMyInvestments(req, res) {
     }
 
     const campaigns = await CrowdfundingCampaign.find({ "pledges.investor": investorId })
-      .populate("farmer", "fullName farmerProfile.district")
+      .populate("farmer", "fullName phone farmerProfile.district")
       .sort({ createdAt: -1 });
 
     const investments = campaigns.flatMap((c) =>
@@ -153,12 +153,14 @@ async function getMyInvestments(req, res) {
         .filter((p) => p.investor.toString() === investorId)
         .map((p) => ({
           campaignId: c._id,
+          pledgeId: p._id, // needed to call PATCH /campaigns/:id/pledges/:pledgeId/confirm
           cropType: c.cropType,
           farmerName: c.farmer?.fullName,
+          farmerPhone: c.farmer?.phone,
           campaignStatus: c.status,
           amountLkr: p.amountLkr,
           expectedReturnLkr: p.expectedReturnLkr,
-          pledgeStatus: p.status,
+          pledgeStatus: p.status, // "interested" | "pledged" | "repaid"
           pledgedAt: p.pledgedAt,
         }))
     );
