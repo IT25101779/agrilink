@@ -53,6 +53,11 @@ router.get("/impact/districts", protect, requireRole("admin"), extras.districtIm
 router.get("/referrals", protect, requireRole("admin"), extras.referralBoard);
 router.get("/profit", protect, requireRole("admin"), extras.profitSummary);
 
+// Data-as-a-service: a second revenue line, licensing anonymized insights to outside partners.
+router.get("/data-partners", protect, requireRole("admin"), extras.listDataPartners);
+router.post("/data-partners", protect, requireRole("admin"), extras.createDataPartner);
+router.patch("/data-partners/:id/revoke", protect, requireRole("admin"), extras.revokeDataPartner);
+
 router.get("/chat/stats", protect, requireRole("admin"), chatStats);
 router.get("/chat/reports", protect, requireRole("admin"), listReports);
 router.get("/chat/media/:id", protect, requireRole("admin"), getMediaForAdmin);

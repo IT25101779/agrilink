@@ -81,6 +81,8 @@ const LorryFleetTracking = require("../models/LorryFleetTracking");
 const MarketShop = require("../models/MarketShop");
 const LocalSupplier = require("../models/LocalSupplier");
 const LogisticsPricingConfig = require("../models/LogisticsPricingConfig");
+const ForwardContract = require("../models/ForwardContract");
+const DataPartner = require("../models/DataPartner");
 const DRIVER_EMAIL = "demo.driver@agrilink.lk";
 const DRIVER2_EMAIL = "demo.driver2@agrilink.lk";
 const DRIVER3_EMAIL = "demo.driver3@agrilink.lk";
@@ -170,6 +172,7 @@ async function main() {
     await LorryFleetTracking.deleteMany({ driver: { $in: previousIds } });
     await DemandRequest.deleteMany({ buyer: { $in: previousIds } }); // also covers buyer3/buyer4
     await CrowdfundingCampaign.deleteMany({ "pledges.investor": { $in: previousIds } });
+    await ForwardContract.deleteMany({ buyer: { $in: previousIds } });
     await User.deleteMany({ _id: { $in: previousIds } });
     console.log("Removed previous demo data.");
   }
@@ -636,6 +639,50 @@ async function main() {
     { name: "Sample Agriculture Extension Officer", kind: "extension_officer", district: "Kandy", phone: "", address: "Replace with the real details", isSample: true },
     { name: "Sample Cooperative Society", kind: "cooperative", district: "Matale", phone: "", address: "Replace with the real details", isSample: true },
   ]);
+  // Government agentic support — real-world titles a farmer can look up and
+  // call for cultivation help (ගොවි නියාමක / සංවර්ධන නිලධාරි / ප්‍රාදේශීය
+  // ලේකම් කාර්යාලය). Numbers are left blank and marked SAMPLE on purpose —
+  // we don't have verified real contact numbers for every division, and
+  // showing a made-up number as if it were real would be worse than
+  // showing none. Fill these in for real from the admin site's Help
+  // Network tab, district by district, before relying on them.
+  const GOV_OFFICER_DISTRICTS = ["Kandy", "Matale", "Nuwara Eliya", "Anuradhapura", "Kurunegala", "Badulla", "Jaffna", "Galle", "Colombo", "Ratnapura"];
+  const govOffices = [];
+  for (const district of GOV_OFFICER_DISTRICTS) {
+    govOffices.push(
+      { name: `${district} Agriculture Officer (ගොවි නියාමක)`, kind: "agriculture_officer", district, phone: "", address: "Replace with the real contact for this Grama Niladhari division", hours: "Mon-Fri 8:30-4:15", isSample: true },
+      { name: `${district} Development Officer (සංවර්ධන නිලධාරි)`, kind: "development_officer", district, phone: "", address: "Replace with the real contact", isSample: true },
+      { name: `${district} Divisional Secretariat Office (ප්‍රාදේශීය ලේකම් කාර්යාලය)`, kind: "divisional_secretariat", district, phone: "", address: "Replace with the real office address and switchboard number", hours: "Mon-Fri 8:30-4:15", isSample: true }
+    );
+  }
+  await AgriOffice.insertMany(govOffices);
+  console.log(`Created ${govOffices.length} government officer contact placeholders (Agriculture Officer / Development Officer / Divisional Secretariat) across ${GOV_OFFICER_DISTRICTS.length} districts — fill in real phone numbers from the admin site.`);
+
+  // ---- 14. Forward/contract listings — a buyer locks in a price BEFORE harvest ----
+  await ForwardContract.deleteMany({ buyer: { $in: [buyer._id, buyer2._id, buyer3._id, buyer4._id] } });
+  const fc1 = await ForwardContract.create({
+    buyer: buyer4._id, cropType: "Carrot", totalQuantityKg: 500, lockedPricePerKg: 230, deliverByDate: daysFromNow(70),
+    district: "Kandy", note: "Supermarket restock — locking in today's price for a harvest in ~10 weeks.", status: "open",
+  });
+  // One farmer already expressed interest and confirmed — shows the two-step flow mid-way.
+  await ForwardContract.findByIdAndUpdate(fc1._id, { $push: { commitments: { farmer: n(2)._id, quantityKg: 150, status: "confirmed", confirmedAt: daysAgo(1) } }, $set: { committedKg: 150 } });
+  await ForwardContract.create({
+    buyer: buyer._id, cropType: "Beans (Bush)", totalQuantityKg: 300, lockedPricePerKg: 340, deliverByDate: daysFromNow(45),
+    district: "Kandy", note: "For our Kandy kitchen — same price locked in regardless of market swings.", status: "open",
+  });
+  await ForwardContract.create({
+    buyer: buyer3._id, cropType: "Brinjal (Eggplant)", totalQuantityKg: 200, lockedPricePerKg: 200, deliverByDate: daysFromNow(60), district: "", note: "Any district, we collect.", status: "open",
+  });
+  console.log("Created 3 forward/contract listings (one with a farmer already confirmed).");
+
+  // ---- 15. Data-as-a-service demo partner (second revenue line, admin-managed) ----
+  await DataPartner.deleteMany({ orgName: { $regex: /\(Demo Partner\)$/ } });
+  const partner1 = await DataPartner.create({ orgName: "Ceylon Fertilizer Co. (Demo Partner)", contactEmail: "partnerships@example.com", monthlyFeeLkr: 25000, createdBy: buyer._id });
+  const partner2 = await DataPartner.create({ orgName: "AgroSure Crop Insurance (Demo Partner)", contactEmail: "data@example.com", monthlyFeeLkr: 40000, createdBy: buyer._id });
+  console.log("Created 2 demo data-as-a-service partners (Rs. 65,000/month combined — shows on the admin Data Partners page).");
+  console.log(`  Demo partner API key 1 (Ceylon Fertilizer Co.): ${partner1.apiKey}`);
+  console.log(`  Demo partner API key 2 (AgroSure Crop Insurance): ${partner2.apiKey}`);
+  console.log(`  Try it: curl -H "X-Api-Key: ${partner1.apiKey}" ${process.env.API_BASE_URL || "<your-api-url>"}/api/partner-insights/price-trends`);
   await SupportPrice.deleteMany({ source: "Sample - replace with the official notice" });
   await YieldRecord.insertMany([{ farmer: farmer._id, cropType: "Tomato", season: "maha", year: new Date().getFullYear() - 1, acres: 2, harvestKg: 9000, district: "Kandy" }, { farmer: farmer._id, cropType: "Carrot", season: "yala", year: new Date().getFullYear() - 1, acres: 1, harvestKg: 6500, district: "Kandy" }]);
   console.log("Created demo ads, prices, surveys, trust history, return trips and a farm ledger.");

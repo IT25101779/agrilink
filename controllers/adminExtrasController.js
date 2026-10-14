@@ -11,6 +11,7 @@ const UserReport = require("../models/UserReport");
 const Feedback = require("../models/Feedback");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const PlatformCommissionLog = require("../models/PlatformCommissionLog");
+const DataPartner = require("../models/DataPartner");
 
 /** GET /api/admin/system — is everything healthy, and what needs the team's attention? */
 async function systemHealth(req, res) {
@@ -109,4 +110,51 @@ async function profitSummary(req, res) {
   }
 }
 
-module.exports = { systemHealth, districtImpact, referralBoard, searchUsers, profitSummary };
+/**
+ * DATA-AS-A-SERVICE admin management — "from admin site the developers
+ * should be able to see all profit", extended to the second revenue line:
+ * licensing anonymized data to outside partners. Billing itself happens
+ * offline (invoice/bank transfer) — this just tracks who has a key and
+ * what they're meant to be billed, same no-online-payments rule as
+ * everywhere else.
+ */
+
+/** GET /api/admin/data-partners */
+async function listDataPartners(req, res) {
+  try {
+    const partners = await DataPartner.find({}).sort({ createdAt: -1 }).lean();
+    const monthlyRecurringRevenueLkr = partners.filter((p) => p.isActive).reduce((sum, p) => sum + (p.monthlyFeeLkr || 0), 0);
+    return res.status(200).json({ success: true, data: partners, monthlyRecurringRevenueLkr });
+  } catch (error) {
+    console.error("listDataPartners error:", error);
+    return res.status(500).json({ success: false, message: "Failed to load data partners." });
+  }
+}
+
+/** POST /api/admin/data-partners  { orgName, contactEmail, contactPhone, monthlyFeeLkr } */
+async function createDataPartner(req, res) {
+  try {
+    const b = req.body || {};
+    if (!b.orgName) return res.status(400).json({ success: false, message: "orgName is required." });
+    const partner = await DataPartner.create({
+      orgName: String(b.orgName).slice(0, 100),
+      contactEmail: String(b.contactEmail || "").slice(0, 150),
+      contactPhone: String(b.contactPhone || "").slice(0, 20),
+      monthlyFeeLkr: Number(b.monthlyFeeLkr) || 0,
+      createdBy: req.userId,
+    });
+    return res.status(201).json({ success: true, message: "Partner created. Give them this API key — it will not be shown again in full here, only in this response.", data: partner });
+  } catch (error) {
+    console.error("createDataPartner error:", error);
+    return res.status(500).json({ success: false, message: "Failed to create data partner." });
+  }
+}
+
+/** PATCH /api/admin/data-partners/:id/revoke */
+async function revokeDataPartner(req, res) {
+  const partner = await DataPartner.findByIdAndUpdate(req.params.id, { $set: { isActive: false } }, { new: true });
+  if (!partner) return res.status(404).json({ success: false, message: "Partner not found." });
+  return res.status(200).json({ success: true, message: "Partner's API key revoked.", data: partner });
+}
+
+module.exports = { systemHealth, districtImpact, referralBoard, searchUsers, profitSummary, listDataPartners, createDataPartner, revokeDataPartner };

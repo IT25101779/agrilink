@@ -35,6 +35,8 @@ const safetyRoutes = require("./routes/safety");
 const recordsRoutes = require("./routes/records");
 const helpRoutes = require("./routes/help");
 const publicRoutes = require("./routes/public");
+const forwardContractRoutes = require("./routes/forwardContracts");
+const partnerInsightsRoutes = require("./routes/partnerInsights");
 const { limiter, requestLogger } = require("./middleware/rateLimit");
 
 const app = express();
@@ -97,6 +99,8 @@ app.use("/api/return-trips", returnTripRoutes);
 app.use("/api/records", recordsRoutes.publicRouter);
 app.use("/api/records", recordsRoutes.router);
 app.use("/api/help", helpRoutes);
+app.use("/api/forward-contracts", forwardContractRoutes);
+app.use("/api/partner-insights", partnerInsightsRoutes);
 app.use("/api", publicRoutes);
 app.use("/api", safetyRoutes);
 

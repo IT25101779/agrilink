@@ -3,7 +3,23 @@ const mongoose = require("mongoose");
 const AgriOfficeSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, maxlength: 100 },
-    kind: { type: String, enum: ["agrarian_service_centre", "extension_officer", "cooperative", "research_station", "government_office", "other"], required: true },
+    kind: {
+      type: String,
+      enum: [
+        "agrarian_service_centre",
+        "extension_officer",
+        "cooperative",
+        "research_station",
+        "government_office",
+        // Added per direct request: specific government contacts a farmer
+        // can call for cultivation support, by their actual Sri Lankan titles.
+        "agriculture_officer", // ගොවි නියාමක (Agrarian Development Dept. Agriculture/Krushikarma Niyamaka)
+        "development_officer", // සංවර්ධන නිලධාරි
+        "divisional_secretariat", // ප්‍රාදේශීය ලේකම් කාර්යාලය
+        "other",
+      ],
+      required: true,
+    },
     district: { type: String, required: true },
     phone: { type: String, default: "" },
     address: { type: String, default: "", maxlength: 200 },

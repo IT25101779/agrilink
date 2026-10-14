@@ -9,7 +9,7 @@ const mongoose = require("mongoose");
  */
 const PlatformCommissionLogSchema = new mongoose.Schema(
   {
-    source: { type: String, enum: ["marketplace_sale", "crowdfunding_pledge", "logistics_booking"], required: true },
+    source: { type: String, enum: ["marketplace_sale", "crowdfunding_pledge", "logistics_booking", "forward_contract"], required: true },
     refId: { type: mongoose.Schema.Types.ObjectId, required: true }, // the listing / campaign / lorry this came from
     farmer: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     amountLkr: { type: Number, required: true },

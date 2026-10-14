@@ -3,9 +3,11 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const DemandRequest = require("../models/DemandRequest");
 const Reminder = require("../models/Reminder");
 const User = require("../models/User");
+const LedgerEntry = require("../models/LedgerEntry");
+const YieldRecord = require("../models/YieldRecord");
 const { buildForecast } = require("../utils/priceForecast");
 const { adviseListing, sortByUrgency } = require("../utils/sellOrHold");
-const { planProfit } = require("../utils/cropEconomics");
+const { planProfit, ECONOMICS } = require("../utils/cropEconomics");
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -307,12 +309,135 @@ async function generatePriceAlerts(req, res) {
   }
 }
 
+/**
+ * GET /api/insights/next-season-advisor?district=&acres=1
+ *
+ * DISTRICT PLANTING ADVISOR — the gap this closes: every other insight here
+ * (Oversupply Guard, Sell-or-Hold, Profit Plan) only helps with a crop the
+ * farmer ALREADY planted or is already asking about one crop at a time.
+ * This answers "what should I plant NEXT, out of everything, right now" —
+ * before land and money are committed — by running the existing Profit
+ * Planner across the WHOLE crop catalogue for this district's current
+ * competition level and price forecast, then ranking the results.
+ */
+async function getNextSeasonAdvisor(req, res) {
+  try {
+    let district = typeof req.query.district === "string" ? req.query.district.trim() : "";
+    if (!district) district = await getFarmerDistrict(req.userId);
+    if (!district) {
+      return res.status(400).json({ success: false, message: "Set your district in Profile first, or pass ?district=" });
+    }
+
+    let acres = Number(req.query.acres);
+    if (!Number.isFinite(acres) || acres <= 0) acres = 1;
+    acres = Math.min(Math.max(acres, 0.1), 100);
+
+    const signals = await computeDistrictSignals(district);
+    const cropTypes = Object.keys(ECONOMICS);
+
+    const results = await Promise.all(
+      cropTypes.map(async (cropType) => {
+        try {
+          const forecast = await buildForecast(cropType, { weeks: 16 });
+          const match = signals.crops.find((c) => String(c.cropType).toLowerCase() === cropType.toLowerCase());
+          const saturationLevel = match ? match.level : signals.enoughData ? "low" : "unknown";
+          const plan = planProfit({ cropType, acres, overrides: {}, forecast, saturationLevel });
+          return {
+            cropType,
+            verdict: plan.verdict,
+            expectedRoiPercent: plan.scenarios.expected.roiPercent,
+            expectedProfitLkr: plan.scenarios.expected.profitLkr,
+            saturationLevel,
+            farmersGrowingNearby: match ? match.farmers : 0,
+            growthDays: ECONOMICS[cropType].growthDays,
+          };
+        } catch (_) {
+          return null; // skip a crop if its forecast/economics can't be built — never fail the whole advisor for one crop
+        }
+      })
+    );
+
+    const ranked = results.filter(Boolean).sort((a, b) => b.expectedRoiPercent - a.expectedRoiPercent);
+    const topOpportunities = ranked.filter((r) => r.verdict !== "loss" && r.saturationLevel !== "high").slice(0, 5);
+    const avoid = ranked.filter((r) => r.verdict === "loss" || r.saturationLevel === "high").slice(0, 5);
+
+    return res.status(200).json({ success: true, data: { district, acres, topOpportunities, avoid, all: ranked } });
+  } catch (error) {
+    console.error("getNextSeasonAdvisor error:", error);
+    return res.status(500).json({ success: false, message: "Failed to build the planting advisor." });
+  }
+}
+
+/**
+ * GET /api/insights/benchmark
+ *
+ * ANONYMIZED BENCHMARKING — "how am I actually doing compared to other
+ * farmers?" using the farmer's OWN LedgerEntry (cost) + YieldRecord (harvest)
+ * data against everyone else's. Only aggregate numbers (an average and a
+ * percentile) ever leave the server — no other farmer's name, id, or raw
+ * figures are ever returned, so this never exposes anyone else's business.
+ */
+async function getBenchmark(req, res) {
+  try {
+    const farmerId = String(req.userId);
+    const me = await User.findById(farmerId).select("farmerProfile.district").lean();
+    const district = (me && me.farmerProfile && me.farmerProfile.district) || "";
+
+    const [allExpense, allYield] = await Promise.all([
+      LedgerEntry.aggregate([{ $match: { type: "expense" } }, { $group: { _id: "$farmer", expense: { $sum: "$amountLkr" } } }]),
+      YieldRecord.aggregate([{ $group: { _id: "$farmer", kg: { $sum: "$harvestKg" } } }]),
+    ]);
+    const kgByFarmer = new Map(allYield.map((y) => [String(y._id), y.kg]));
+    const rows = allExpense
+      .map((e) => {
+        const kg = kgByFarmer.get(String(e._id));
+        return kg > 0 ? { farmer: String(e._id), costPerKg: e.expense / kg } : null;
+      })
+      .filter(Boolean);
+
+    const mine = rows.find((r) => r.farmer === farmerId);
+    if (!mine) {
+      return res.status(200).json({
+        success: true,
+        data: null,
+        message: "Add some ledger expenses (My Ledger) and at least one harvest yield record first to see how you compare.",
+      });
+    }
+
+    const districtFarmerIds = district ? new Set((await User.find({ "farmerProfile.district": district }).select("_id").lean()).map((u) => String(u._id))) : null;
+    const districtRows = districtFarmerIds ? rows.filter((r) => districtFarmerIds.has(r.farmer)) : rows;
+
+    const average = (list) => Math.round(list.reduce((sum, r) => sum + r.costPerKg, 0) / list.length);
+    // Lower cost-per-kg is better, so "percentile" here means "cheaper than this % of farmers".
+    const cheaperThanPercent = (list, value) => Math.round((list.filter((r) => r.costPerKg >= value).length / list.length) * 100);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        district,
+        myCostPerKgLkr: Math.round(mine.costPerKg),
+        districtAverageCostPerKgLkr: districtRows.length ? average(districtRows) : null,
+        nationalAverageCostPerKgLkr: rows.length ? average(rows) : null,
+        cheaperThanPercentOfDistrict: districtRows.length ? cheaperThanPercent(districtRows, mine.costPerKg) : null,
+        cheaperThanPercentOfNational: rows.length ? cheaperThanPercent(rows, mine.costPerKg) : null,
+        sampleSizeDistrict: districtRows.length,
+        sampleSizeNational: rows.length,
+      },
+    });
+  } catch (error) {
+    console.error("getBenchmark error:", error);
+    return res.status(500).json({ success: false, message: "Failed to build your benchmark." });
+  }
+}
+
 module.exports = {
   getPlantingSignals,
   getPriceForecast,
   getSellOrHold,
   generatePriceAlerts,
   getProfitPlan,
+  getNextSeasonAdvisor,
+  getBenchmark,
   // exported for tests
   computeDistrictSignals,
   classifySaturation,
