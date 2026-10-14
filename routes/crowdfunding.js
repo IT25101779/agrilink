@@ -9,6 +9,7 @@ const {
   getMyCampaigns,
   getMyInvestments,
   pledgeToCampaign,
+  confirmPledge,
   repayCampaign,
 } = require("../controllers/crowdfundingController");
 
@@ -18,6 +19,7 @@ router.get("/campaigns", getCampaigns);
 router.get("/campaigns/mine", getMyCampaigns);
 router.get("/investments", getMyInvestments);
 router.post("/campaigns/:id/pledge", pledgeToCampaign);
+router.patch("/campaigns/:id/pledges/:pledgeId/confirm", confirmPledge);
 router.patch("/campaigns/:id/repay", ownerOf(CrowdfundingCampaign, "farmer"), repayCampaign);
 
 module.exports = router;

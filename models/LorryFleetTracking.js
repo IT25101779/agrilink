@@ -16,12 +16,23 @@ const LorryFleetTrackingSchema = new mongoose.Schema(
       required: true,
     },
     isTrackingActive: { type: Boolean, default: false },
+    // Separate from isTrackingActive: the driver can be visible/tracked but
+    // say "I'm full, stop sending me requests" without going fully offline.
+    // Request a user asked for directly: "when the lorry fulled the driver
+    // should be able to update as fulled and not getting crops any more."
+    acceptingCargo: { type: Boolean, default: true },
     cargoBookings: {
       type: [
         {
           farmer: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
           listingRef: { type: mongoose.Schema.Types.ObjectId, ref: "MarketplaceListing" },
+          cropType: { type: String },
           weightKg: { type: Number },
+          // Which shop at the destination market the farmer chose to sell/drop to.
+          shop: { type: mongoose.Schema.Types.ObjectId, ref: "MarketShop" },
+          // Rent calculated at request time from the admin-set tiered rate —
+          // stored so it never silently changes after the farmer agreed to it.
+          calculatedRentLkr: { type: Number },
           pickupLocation: {
             type: { type: String, enum: ["Point"], default: "Point" },
             coordinates: { type: [Number] },

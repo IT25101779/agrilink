@@ -1,6 +1,8 @@
 const mongoose = require("mongoose");
 const CrowdfundingCampaign = require("../models/CrowdfundingCampaign");
 const User = require("../models/User");
+const { notifyFarmer } = require("../utils/notify");
+const { PLATFORM_COMMISSION_RATE, NO_COMMISSION_BELOW_LKR, calculateCommission } = require("../utils/commission");
 
 /**
  * IMPORTANT DEMO-SCOPE NOTE: this module simulates the funding ledger
@@ -9,6 +11,20 @@ const User = require("../models/User");
  * need a licensed payment processor (e.g. PayHere for LKR) and regulatory
  * review — crowdfunding/lending is a regulated financial activity in most
  * jurisdictions, including Sri Lanka.
+ *
+ * FLOW REDESIGNED (Oct 2026) per a direct request: "don't make booking in
+ * here — if an investor likes to invest, after adding details they can
+ * discuss over the phone, then they can confirm through the system; if
+ * they confirmed it through the system they will get benefits."
+ *
+ * So pledging is now two steps, not one:
+ *   1. pledgeToCampaign — investor expresses INTEREST only. Nothing is
+ *      counted toward the funding goal yet. The farmer's phone number is
+ *      returned immediately so they can call and discuss first.
+ *   2. confirmPledge — AFTER that phone call, either side confirms through
+ *      the app. Only then does the amount count toward the campaign's
+ *      goal, and only a confirmed pledge earns the investor "benefits"
+ *      (and the platform its small commission on a successful raise).
  */
 
 const MAX_PLEDGE_RETRIES = 3;
@@ -156,15 +172,10 @@ async function getMyInvestments(req, res) {
 
 /**
  * POST /api/crowdfunding/campaigns/:id/pledge
- * An urban consumer/investor pledges an amount toward a farmer's campaign.
- * The pledge is capped at the amount still needed (no overfunding), and
- * reaching the goal flips status to "funded".
- *
- * RACE-CONDITION FIX: the old code read the campaign, did the maths in
- * memory, then saved. Two investors pledging at the same moment would both
- * read the same "amount raised" and the campaign could end up over its goal.
- * Now the write only succeeds if the amount raised is STILL the value we
- * read; if someone else pledged in between, we re-read and try again.
+ * STEP 1 of 2: an investor expresses INTEREST in a campaign — no money
+ * (real or simulated) moves yet, and nothing counts toward the funding
+ * goal. The farmer's phone number comes back immediately so the investor
+ * can call and discuss the details first, exactly as asked.
  */
 async function pledgeToCampaign(req, res) {
   try {
@@ -179,61 +190,118 @@ async function pledgeToCampaign(req, res) {
       return res.status(400).json({ success: false, message: "A valid investor and a positive amountLkr are required." });
     }
 
+    const campaign = await CrowdfundingCampaign.findById(id).populate("farmer", "fullName phone");
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: "Campaign not found." });
+    }
+    if (campaign.farmer._id.toString() === String(investor)) {
+      return res.status(403).json({ success: false, message: "You cannot invest in your own campaign." });
+    }
+    if (campaign.status !== "open") {
+      return res.status(409).json({ success: false, message: `This campaign is no longer open (status: ${campaign.status}).` });
+    }
+    if (new Date(campaign.deadline) < new Date()) {
+      await CrowdfundingCampaign.updateOne({ _id: id, status: "open" }, { $set: { status: "failed" } });
+      return res.status(409).json({ success: false, message: "This campaign's funding deadline has passed." });
+    }
+    const remainingNeeded = round2(campaign.fundingGoalLkr - campaign.amountRaisedLkr);
+    if (remainingNeeded <= 0) {
+      return res.status(409).json({ success: false, message: "This campaign has already reached its goal." });
+    }
+
+    const intendedAmount = round2(Math.min(requested, remainingNeeded));
+    const expectedReturnLkr = round2(intendedAmount * (1 + campaign.returnPercentage / 100));
+
+    const updated = await CrowdfundingCampaign.findByIdAndUpdate(
+      id,
+      { $push: { pledges: { investor, amountLkr: intendedAmount, expectedReturnLkr, status: "interested" } } },
+      { new: true }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Interest recorded. Call the farmer to discuss, then confirm through the app to make it count.",
+      farmerPhone: campaign.farmer.phone,
+      farmerName: campaign.farmer.fullName,
+      data: updated,
+    });
+  } catch (error) {
+    console.error("pledgeToCampaign error:", error);
+    return res.status(500).json({ success: false, message: "Failed to record interest.", error: error.message });
+  }
+}
+
+/**
+ * PATCH /api/crowdfunding/campaigns/:id/pledges/:pledgeId/confirm
+ * STEP 2 of 2: AFTER the phone call, either the investor or the farmer
+ * confirms through the app that the deal is real. Only now does the
+ * amount count toward the funding goal, the investor earns "benefits"
+ * (their expected return becomes real once repaid), and the platform logs
+ * its small commission/fee on the raise.
+ *
+ * Kept as a retry loop (like the old single-step pledge was) because two
+ * confirms landing at once could still overfund the campaign.
+ */
+async function confirmPledge(req, res) {
+  try {
+    const { id, pledgeId } = req.params;
+    if (!isValidId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign id." });
+    }
+
     for (let attempt = 0; attempt < MAX_PLEDGE_RETRIES; attempt++) {
       const campaign = await CrowdfundingCampaign.findById(id);
       if (!campaign) {
         return res.status(404).json({ success: false, message: "Campaign not found." });
       }
-      if (campaign.farmer.toString() === String(investor)) {
-        return res.status(403).json({ success: false, message: "You cannot invest in your own campaign." });
+      const pledge = campaign.pledges.id(pledgeId);
+      if (!pledge) {
+        return res.status(404).json({ success: false, message: "Pledge not found." });
+      }
+      const isInvestor = String(pledge.investor) === String(req.userId);
+      const isFarmer = String(campaign.farmer) === String(req.userId);
+      if (!isInvestor && !isFarmer) {
+        return res.status(403).json({ success: false, message: "Only the investor or the farmer can confirm this." });
+      }
+      if (pledge.status !== "interested") {
+        return res.status(409).json({ success: false, message: `This pledge is already ${pledge.status}.` });
       }
       if (campaign.status !== "open") {
         return res.status(409).json({ success: false, message: `This campaign is no longer open (status: ${campaign.status}).` });
       }
-      if (new Date(campaign.deadline) < new Date()) {
-        await CrowdfundingCampaign.updateOne({ _id: id, status: "open" }, { $set: { status: "failed" } });
-        return res.status(409).json({ success: false, message: "This campaign's funding deadline has passed." });
-      }
 
       const remainingNeeded = round2(campaign.fundingGoalLkr - campaign.amountRaisedLkr);
       if (remainingNeeded <= 0) {
-        return res.status(409).json({ success: false, message: "This campaign has already reached its goal." });
+        return res.status(409).json({ success: false, message: "This campaign has already reached its goal from other confirmed pledges." });
       }
-
-      const actualPledgeAmount = round2(Math.min(requested, remainingNeeded));
-      const expectedReturnLkr = round2(actualPledgeAmount * (1 + campaign.returnPercentage / 100));
-      const newAmountRaised = round2(campaign.amountRaisedLkr + actualPledgeAmount);
+      const actualAmount = round2(Math.min(pledge.amountLkr, remainingNeeded));
+      const newAmountRaised = round2(campaign.amountRaisedLkr + actualAmount);
       const reachesGoal = newAmountRaised >= campaign.fundingGoalLkr;
 
       const updated = await CrowdfundingCampaign.findOneAndUpdate(
-        { _id: id, status: "open", amountRaisedLkr: campaign.amountRaisedLkr },
+        { _id: id, "pledges._id": pledgeId, "pledges.status": "interested", amountRaisedLkr: campaign.amountRaisedLkr },
         {
-          $push: { pledges: { investor, amountLkr: actualPledgeAmount, expectedReturnLkr, status: "pledged" } },
-          $set: { amountRaisedLkr: newAmountRaised, status: reachesGoal ? "funded" : "open" },
+          $set: {
+            "pledges.$.status": "pledged",
+            "pledges.$.amountLkr": actualAmount,
+            amountRaisedLkr: newAmountRaised,
+            status: reachesGoal ? "funded" : "open",
+          },
         },
         { new: true }
       );
 
       if (updated) {
-        return res.status(200).json({
-          success: true,
-          message:
-            actualPledgeAmount < requested
-              ? `Campaign only needed LKR ${actualPledgeAmount} more to reach its goal — your pledge was capped accordingly.`
-              : "Pledge successful.",
-          data: updated,
-        });
+        await logCommission({ source: "crowdfunding_pledge", refId: updated._id, farmer: updated.farmer, amountLkr: actualAmount });
+        return res.status(200).json({ success: true, message: "Pledge confirmed.", data: updated });
       }
-      // Someone else pledged between our read and write — loop and re-read.
+      // Someone else confirmed/changed something between our read and write — loop and re-read.
     }
 
-    return res.status(409).json({
-      success: false,
-      message: "This campaign is receiving many pledges right now. Please try again.",
-    });
+    return res.status(409).json({ success: false, message: "This campaign is receiving many confirmations right now. Please try again." });
   } catch (error) {
-    console.error("pledgeToCampaign error:", error);
-    return res.status(500).json({ success: false, message: "Failed to process pledge.", error: error.message });
+    console.error("confirmPledge error:", error);
+    return res.status(500).json({ success: false, message: "Failed to confirm pledge.", error: error.message });
   }
 }
 
@@ -296,4 +364,4 @@ async function repayCampaign(req, res) {
   }
 }
 
-module.exports = { createCampaign, getCampaigns, getMyCampaigns, getMyInvestments, pledgeToCampaign, repayCampaign };
+module.exports = { createCampaign, getCampaigns, getMyCampaigns, getMyInvestments, pledgeToCampaign, confirmPledge, repayCampaign };

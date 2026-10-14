@@ -1,10 +1,9 @@
 const mongoose = require("mongoose");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { computeFreshness } = require("../utils/shelfLife");
+const { notifyFarmer } = require("../utils/notify");
+const { logCommission } = require("../utils/commission");
 
-const SECONDARY_MARKUP_DOWN_PERCENT = 20; // discount applied when redirected to secondary tier
-const MAX_TOTAL_MARKDOWN_PERCENT = 40; // cap so a farmer never loses more than 40% to rejections
-const SECONDARY_SEGMENTS = ["factory", "restaurant", "compost_hub"];
 const VALID_GRADES = ["A", "B", "C"];
 
 function isValidId(id) {
@@ -172,20 +171,31 @@ async function updateListing(req, res) {
 /**
  * PATCH /api/marketplace/listings/:id/reject
  *
- * Core "Reject Redirection" mitigation logic. When a primary B2B buyer
- * rejects produce, the listing is automatically:
- *   1. logged with the rejection reason/defect,
- *   2. marked down 20% (stacking, capped at 40% total),
- *   3. moved from "primary" to "secondary" tier,
- *   4. re-targeted to factories / restaurants / compost hubs,
- *   5. re-opened as "listed" so it shows up on the secondary market feed.
+ * REDESIGNED (Oct 2026) to close a real abuse loophole that was flagged:
+ * "Buyers could falsely reject produce to get a discount." The OLD
+ * behaviour auto-applied a 20% markdown and moved the listing to the
+ * public secondary tier the instant ANY buyer rejected it — so a buyer
+ * (or a buyer colluding with someone else) could reject perfectly good
+ * produce purely to force a cheaper price for everyone, including
+ * themselves on a later purchase.
  *
- * Guards added:
- *   - a farmer cannot reject their own listing,
- *   - sold / expired listings cannot be rejected,
- *   - if someone has reserved it, only THAT buyer can reject it,
- *   - the update is conditional, so two simultaneous rejections cannot
- *     both apply a markdown to the same listing.
+ * NEW behaviour (matches what was asked for):
+ *   1. The rejection is only ever LOGGED (reason, defect type, who, when).
+ *   2. The price and tier of the listing are NOT touched automatically —
+ *      every other buyer still sees the original listing at the original
+ *      price on the normal marketplace.
+ *   3. The farmer is notified with the rejection count and reasons so far.
+ *   4. The rejecting buyer — and only them — can now also see this exact
+ *      listing surfaced in their personal "Secondary market" view
+ *      (see getMySecondaryMarket below), in case the farmer later drops
+ *      the price for it.
+ *   5. ONLY the farmer can actually lower the price (via the existing
+ *      updateListing endpoint, which they already own) — and when they
+ *      do, that new price is the one everyone sees, not a hidden
+ *      discount manufactured by a rejection.
+ *   6. If the rejecting buyer had this listing reserved, the reservation
+ *      is released back to "listed" so other buyers can still buy it —
+ *      but, again, at the unchanged price.
  */
 async function rejectAndRedirectListing(req, res) {
   try {
@@ -221,20 +231,16 @@ async function rejectAndRedirectListing(req, res) {
     if (listing.status === "reserved" && listing.orderedBy && listing.orderedBy.toString() !== String(rejectedBy)) {
       return res.status(403).json({ success: false, message: "This listing is reserved by another buyer." });
     }
+    // One rejection per buyer per listing — stops the same buyer inflating the count.
+    const alreadyRejectedByThisBuyer = listing.rejectionHistory.some((r) => String(r.rejectedBy) === String(rejectedBy));
+    if (alreadyRejectedByThisBuyer) {
+      return res.status(409).json({ success: false, message: "You've already rejected this listing." });
+    }
 
-    const newMarkdownPercent = Math.min(
-      (listing.markdownPercentApplied || 0) + SECONDARY_MARKUP_DOWN_PERCENT,
-      MAX_TOTAL_MARKDOWN_PERCENT
-    );
-    const newPrice = Math.round(listing.originalPricePerKg * (1 - newMarkdownPercent / 100) * 100) / 100;
+    const wasReservedByRejecter = listing.status === "reserved";
 
-    // Conditional update: only applies if nobody changed the listing since we read it.
     const updated = await MarketplaceListing.findOneAndUpdate(
-      {
-        _id: id,
-        status: listing.status,
-        markdownPercentApplied: listing.markdownPercentApplied || 0,
-      },
+      { _id: id, status: listing.status },
       {
         $push: {
           rejectionHistory: {
@@ -244,14 +250,9 @@ async function rejectAndRedirectListing(req, res) {
             rejectedAt: new Date(),
           },
         },
-        $set: {
-          markdownPercentApplied: newMarkdownPercent,
-          currentPricePerKg: newPrice,
-          tier: "secondary",
-          targetBuyerSegment: SECONDARY_SEGMENTS,
-          status: "listed",
-        },
-        $unset: { orderedBy: "" },
+        // Releases the listing back onto the open market if the rejecting
+        // buyer had it reserved — price and tier are left exactly as they were.
+        ...(wasReservedByRejecter ? { $set: { status: "listed" }, $unset: { orderedBy: "" } } : {}),
       },
       { new: true, runValidators: true }
     );
@@ -263,14 +264,55 @@ async function rejectAndRedirectListing(req, res) {
       });
     }
 
+    const rejectionCount = updated.rejectionHistory.length;
+    const recentReasons = updated.rejectionHistory.slice(-3).map((r) => r.reason).join("; ");
+    await notifyFarmer(updated.farmer, {
+      type: "order_update",
+      dedupeKey: `reject-${updated._id}-${rejectionCount}`,
+      title: `${rejectionCount} buyer${rejectionCount > 1 ? "s" : ""} rejected your ${updated.cropType}`,
+      message: `Reason(s): ${recentReasons}. The price has NOT changed automatically — it only shows at a lower price to buyers who rejected it if you choose to drop it yourself.`,
+      cropType: updated.cropType,
+    });
+
     return res.status(200).json({
       success: true,
-      message: "Listing rejected and automatically redirected to secondary market tier.",
+      message: "Rejection recorded. The farmer has been notified — the price was not changed automatically.",
       data: updated,
     });
   } catch (error) {
     console.error("rejectAndRedirectListing error:", error);
     return res.status(500).json({ success: false, message: "Failed to process rejection.", error: error.message });
+  }
+}
+
+/**
+ * GET /api/marketplace/listings/secondary-for-me
+ * A buyer's personal "second chance" market: every still-available listing
+ * THEY rejected, so they can come back if the farmer later drops the price.
+ * Nobody else sees a listing here just because somebody else rejected it —
+ * that's the fix for the "fake rejection to get a cheap price for everyone"
+ * loophole.
+ */
+async function getMySecondaryMarket(req, res) {
+  try {
+    const listings = await MarketplaceListing.find({
+      "rejectionHistory.rejectedBy": req.userId,
+      status: "listed",
+    })
+      .populate("farmer", "fullName phone farmerProfile.district")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const now = new Date();
+    const data = listings.map((listing) => {
+      const myRejections = listing.rejectionHistory.filter((r) => String(r.rejectedBy) === String(req.userId));
+      return { ...listing, freshness: computeFreshness(listing, now), myRejectionReasons: myRejections.map((r) => r.reason) };
+    });
+
+    return res.status(200).json({ success: true, count: data.length, data });
+  } catch (error) {
+    console.error("getMySecondaryMarket error:", error);
+    return res.status(500).json({ success: false, message: "Failed to load your secondary market.", error: error.message });
   }
 }
 
@@ -391,6 +433,11 @@ async function completeSale(req, res) {
       return res.status(409).json({ success: false, message: "This order was just updated. Please refresh." });
     }
 
+    // 5% platform commission on the completed deal (flat small fee instead,
+    // under LKR 1000) — bookkeeping only, no money actually moves here.
+    const saleValueLkr = (sold.agreedPricePerKg || sold.currentPricePerKg) * sold.quantityKg;
+    await logCommission({ source: "marketplace_sale", refId: sold._id, farmer: sold.farmer, amountLkr: saleValueLkr });
+
     return res.status(200).json({ success: true, message: "Sale completed.", data: sold });
   } catch (error) {
     console.error("completeSale error:", error);
@@ -403,6 +450,7 @@ module.exports = {
   getListings,
   updateListing,
   rejectAndRedirectListing,
+  getMySecondaryMarket,
   confirmOrder,
   completeSale,
 };

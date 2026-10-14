@@ -8,6 +8,7 @@ const {
   getListings,
   updateListing,
   rejectAndRedirectListing,
+  getMySecondaryMarket,
   confirmOrder,
   completeSale,
 } = require("../controllers/marketplaceController");
@@ -15,6 +16,9 @@ const {
 router.use(protect, bindIdentity);
 router.post("/listings", createListing);
 router.get("/listings", getListings);
+// Must come before the "/listings/:id" style routes below, or Express would
+// try to treat "secondary-for-me" as an :id.
+router.get("/listings/secondary-for-me", getMySecondaryMarket);
 router.patch("/listings/:id", ownerOf(MarketplaceListing, "farmer"), updateListing);
 router.patch("/listings/:id/reject", rejectAndRedirectListing);
 router.patch("/listings/:id/confirm-order", confirmOrder);

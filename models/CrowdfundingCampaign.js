@@ -8,8 +8,11 @@ const PledgeSchema = new mongoose.Schema(
     pledgedAt: { type: Date, default: Date.now },
     status: {
       type: String,
-      enum: ["pledged", "repaid"],
-      default: "pledged",
+      // "interested": investor expressed interest, nothing counted yet —
+      // they should call the farmer first. "pledged": confirmed through the
+      // app AFTER that call, now counted toward the funding goal.
+      enum: ["interested", "pledged", "repaid"],
+      default: "interested",
     },
   },
   { _id: true }

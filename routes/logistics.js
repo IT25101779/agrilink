@@ -7,10 +7,16 @@ const {
   upsertLorryStatus,
   updateLocation,
   toggleTracking,
+  toggleAcceptingCargo,
   getNearbyLorries,
   getMyLorry,
   requestCargo,
   updateCargoBooking,
+  getShopsByMarket,
+  getPricingConfig,
+  updatePricingConfig,
+  getRentQuote,
+  getMyCargoBookings,
 } = require("../controllers/logisticsController");
 
 router.use(protect, bindIdentity);
@@ -29,11 +35,19 @@ async function lorryParty(req, res, next) {
   }
 }
 
+// Shop directory + pricing (read is open to any logged-in user; writing price is admin-only)
+router.get("/shops", getShopsByMarket);
+router.get("/pricing", getPricingConfig);
+router.patch("/pricing", requireRole("admin"), updatePricingConfig);
+router.get("/rent-quote", getRentQuote);
+
 router.post("/lorries", requireRole("driver"), upsertLorryStatus);
 router.get("/lorries/nearby", getNearbyLorries);
 router.get("/lorries/mine", getMyLorry);
+router.get("/lorries/my-bookings", requireRole("farmer"), getMyCargoBookings);
 router.patch("/lorries/:id/location", ownerOf(LorryFleetTracking, "driver"), updateLocation);
 router.patch("/lorries/:id/toggle-tracking", ownerOf(LorryFleetTracking, "driver"), toggleTracking);
+router.patch("/lorries/:id/accepting-cargo", ownerOf(LorryFleetTracking, "driver"), toggleAcceptingCargo);
 router.post("/lorries/:id/cargo-request", requireRole("farmer"), requestCargo);
 router.patch("/lorries/:id/cargo/:bookingId", lorryParty, updateCargoBooking);
 

@@ -51,6 +51,7 @@ router.get("/system", protect, requireRole("admin"), extras.systemHealth);
 router.get("/users/search", protect, requireRole("admin"), extras.searchUsers);
 router.get("/impact/districts", protect, requireRole("admin"), extras.districtImpact);
 router.get("/referrals", protect, requireRole("admin"), extras.referralBoard);
+router.get("/profit", protect, requireRole("admin"), extras.profitSummary);
 
 router.get("/chat/stats", protect, requireRole("admin"), chatStats);
 router.get("/chat/reports", protect, requireRole("admin"), listReports);

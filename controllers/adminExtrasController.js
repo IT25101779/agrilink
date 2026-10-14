@@ -10,6 +10,7 @@ const Dispute = require("../models/Dispute");
 const UserReport = require("../models/UserReport");
 const Feedback = require("../models/Feedback");
 const MarketplaceListing = require("../models/MarketplaceListing");
+const PlatformCommissionLog = require("../models/PlatformCommissionLog");
 
 /** GET /api/admin/system — is everything healthy, and what needs the team's attention? */
 async function systemHealth(req, res) {
@@ -63,4 +64,49 @@ async function searchUsers(req, res) {
   return res.status(200).json({ success: true, data: users.map((u) => ({ id: String(u._id), name: u.fullName, email: u.email, role: u.role, district: u.farmerProfile && u.farmerProfile.district, officerDistricts: (u.officerProfile && u.officerProfile.districts) || [] })) });
 }
 
-module.exports = { systemHealth, districtImpact, referralBoard, searchUsers };
+/**
+ * GET /api/admin/profit — "from admin site the developers should be able to
+ * see the all profit." Totals the 5%-commission / flat-fee bookkeeping rows
+ * (see utils/commission.js) by source, plus a daily series for a chart.
+ */
+async function profitSummary(req, res) {
+  try {
+    const rows = await PlatformCommissionLog.find({}).sort({ createdAt: -1 }).lean();
+    const totalCommissionLkr = rows.reduce((sum, r) => sum + r.commissionLkr, 0);
+    const totalDealValueLkr = rows.reduce((sum, r) => sum + r.amountLkr, 0);
+
+    const bySource = {};
+    for (const r of rows) {
+      bySource[r.source] = bySource[r.source] || { count: 0, commissionLkr: 0, dealValueLkr: 0 };
+      bySource[r.source].count++;
+      bySource[r.source].commissionLkr += r.commissionLkr;
+      bySource[r.source].dealValueLkr += r.amountLkr;
+    }
+
+    const byDay = {};
+    for (const r of rows) {
+      const day = r.createdAt.toISOString().slice(0, 10);
+      byDay[day] = (byDay[day] || 0) + r.commissionLkr;
+    }
+    const dailySeries = Object.entries(byDay)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([day, commissionLkr]) => ({ day, commissionLkr }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totalCommissionLkr,
+        totalDealValueLkr,
+        dealCount: rows.length,
+        bySource,
+        dailySeries,
+        recent: rows.slice(0, 30),
+      },
+    });
+  } catch (error) {
+    console.error("profitSummary error:", error);
+    return res.status(500).json({ success: false, message: "Failed to load profit summary." });
+  }
+}
+
+module.exports = { systemHealth, districtImpact, referralBoard, searchUsers, profitSummary };
