@@ -229,12 +229,108 @@ async function submitVerification(req, res) {
   } catch (error) { console.error("submitVerification error:", error); return fail(res, 500, "Failed to send the document."); }
 }
 
+/**
+ * POST /api/auth/verification/driver
+ * { licenseImageBase64, vehicleLicenseImageBase64, vehicleImageBase64, vehicleLicenseExpiryDate }
+ * The mandatory 3-photo submission every driver must complete right after
+ * registering (or to resubmit after a rejection) before an admin can
+ * approve them. All three photos are required together — there's no
+ * partial submission, since an admin reviewing "2 of 3 documents" isn't
+ * meaningfully safer than reviewing none.
+ */
+async function submitDriverVerification(req, res) {
+  try {
+    const user = await User.findById(req.userId).select("role verification driverProfile avatarUpdatedAt");
+    if (!user || user.role !== "driver") return fail(res, 403, "Only driver accounts submit these documents.");
+    if (user.verification?.status === "verified") return fail(res, 409, "Your driver account is already approved.", "already_verified");
+    if (!user.avatarUpdatedAt) return fail(res, 400, "Please add your profile photo first, then submit your driving documents.", "avatar_required");
+
+    const b = req.body || {};
+    const license = decodeImage(b.licenseImageBase64);
+    if (license.error) return fail(res, license.status || 400, `Driving license photo: ${license.error}`);
+    const vehicleLicense = decodeImage(b.vehicleLicenseImageBase64);
+    if (vehicleLicense.error) return fail(res, vehicleLicense.status || 400, `Vehicle license photo: ${vehicleLicense.error}`);
+    const vehicle = decodeImage(b.vehicleImageBase64);
+    if (vehicle.error) return fail(res, vehicle.status || 400, `Vehicle photo: ${vehicle.error}`);
+
+    const expiry = new Date(b.vehicleLicenseExpiryDate);
+    if (isNaN(expiry.getTime())) return fail(res, 400, "A valid vehicle license expiry date is required.");
+    if (expiry < new Date()) return fail(res, 400, "That vehicle license has already expired — please renew it before submitting.");
+
+    // Replace any previous submission (e.g. resubmitting after a rejection).
+    await Photo.deleteMany({ owner: req.userId, purpose: "verification" });
+    await Photo.create([
+      { owner: req.userId, purpose: "verification", label: "driving_license", mime: license.mime, data: license.bytes, size: license.bytes.length },
+      { owner: req.userId, purpose: "verification", label: "vehicle_license", mime: vehicleLicense.mime, data: vehicleLicense.bytes, size: vehicleLicense.bytes.length },
+      { owner: req.userId, purpose: "verification", label: "vehicle_photo", mime: vehicle.mime, data: vehicle.bytes, size: vehicle.bytes.length },
+    ]);
+
+    await User.updateOne(
+      { _id: req.userId },
+      {
+        $set: {
+          "verification.status": "pending",
+          "verification.docType": "driver_docs",
+          "verification.submittedAt": new Date(),
+          "verification.note": "",
+          "driverProfile.vehicleLicenseExpiryDate": expiry,
+        },
+      }
+    );
+
+    return res.status(201).json({ success: true, message: "Documents submitted. An admin will review them and you'll be able to log in once approved." });
+  } catch (error) {
+    console.error("submitDriverVerification error:", error);
+    return fail(res, 500, "Failed to submit your documents.");
+  }
+}
+
+/** GET /api/auth/verification/driver/status — so the app can show pending/rejected messaging without a full /me call. */
+async function getDriverVerificationStatus(req, res) {
+  const user = await User.findById(req.userId).select("role verification");
+  if (!user || user.role !== "driver") return fail(res, 403, "Only driver accounts have this status.");
+  return res.status(200).json({ success: true, data: { status: user.verification?.status || "none", note: user.verification?.note || "" } });
+}
+
 async function adminVerifications(req, res) {
   const status = req.query.status || "pending";
-  const users = await User.find({ "verification.status": status }).select("fullName role phone verification farmerProfile.district buyerProfile.companyName").sort({ "verification.submittedAt": 1 }).limit(100).lean();
-  const photos = await Photo.find({ purpose: "verification", owner: { $in: users.map((u) => u._id) } }).select("owner").lean();
-  const photoOf = new Map(photos.map((p) => [String(p.owner), String(p._id)]));
-  return res.status(200).json({ success: true, data: users.map((u) => ({ userId: String(u._id), name: u.fullName, role: u.role, phone: u.phone, district: u.farmerProfile && u.farmerProfile.district, company: u.buyerProfile && u.buyerProfile.companyName, docType: u.verification.docType, submittedAt: u.verification.submittedAt, photoId: photoOf.get(String(u._id)) || null })) });
+  const users = await User.find({ "verification.status": status }).select("fullName role phone verification farmerProfile.district buyerProfile.companyName driverProfile").sort({ "verification.submittedAt": 1 }).limit(100).lean();
+  const photos = await Photo.find({ purpose: "verification", owner: { $in: users.map((u) => u._id) } }).select("owner label").lean();
+  // Most users have exactly one verification photo (NIC/business reg), but
+  // a driver has three (license, vehicle license, vehicle) — group by
+  // owner so the admin page can show either shape without a second call.
+  const photosByOwner = new Map();
+  for (const p of photos) {
+    const key = String(p.owner);
+    if (!photosByOwner.has(key)) photosByOwner.set(key, []);
+    photosByOwner.get(key).push({ id: String(p._id), label: p.label });
+  }
+  const now = new Date();
+  return res.status(200).json({
+    success: true,
+    data: users.map((u) => {
+      const myPhotos = photosByOwner.get(String(u._id)) || [];
+      const expiry = u.driverProfile?.vehicleLicenseExpiryDate;
+      return {
+        userId: String(u._id),
+        name: u.fullName,
+        role: u.role,
+        phone: u.phone,
+        district: u.farmerProfile && u.farmerProfile.district,
+        company: u.buyerProfile && u.buyerProfile.companyName,
+        docType: u.verification.docType,
+        submittedAt: u.verification.submittedAt,
+        // Back-compat single photoId for the existing farmer/buyer NIC flow...
+        photoId: myPhotos[0]?.id || null,
+        // ...and the full labeled set for a driver's 3 documents.
+        photos: myPhotos,
+        vehicleRegistrationNo: u.driverProfile?.vehicleRegistrationNo || null,
+        vehicleLicenseExpiryDate: expiry || null,
+        vehicleLicenseExpired: expiry ? new Date(expiry) < now : null,
+        vehicleLicenseExpiringSoon: expiry ? new Date(expiry) < new Date(now.getTime() + 30 * 24 * 3600 * 1000) : null,
+      };
+    }),
+  });
 }
 
 /** POST /api/admin/verifications/:userId { decision: "verified"|"rejected", note } */
@@ -249,7 +345,16 @@ async function decideVerification(req, res) {
     if (decision === "verified" && user.role === "buyer") set["buyerProfile.verifiedBusiness"] = true;
     await User.updateOne({ _id: user._id }, { $set: set });
     await Photo.deleteMany({ owner: user._id, purpose: "verification" }); // the document is not kept
-    if (user.role === "farmer") await notifyFarmer(user._id, { type: "order_update", dedupeKey: `verify-${user._id}-${decision}-${Date.now()}`, title: decision === "verified" ? "You are verified ✓" : "Verification not accepted", message: decision === "verified" ? "Buyers now see a Verified badge on your listings." : (set["verification.note"] || "Please send a clearer photo of your document.") });
+    if (user.role === "farmer" || user.role === "driver") {
+      const driverTitle = decision === "verified" ? "Your driver account is approved ✓" : "Driver application not approved";
+      const driverMessage = decision === "verified" ? "You can now log in and start accepting cargo bookings." : (set["verification.note"] || "Please register again with clearer documents.");
+      await notifyFarmer(user._id, {
+        type: "order_update",
+        dedupeKey: `verify-${user._id}-${decision}-${Date.now()}`,
+        title: user.role === "driver" ? driverTitle : decision === "verified" ? "You are verified ✓" : "Verification not accepted",
+        message: user.role === "driver" ? driverMessage : (decision === "verified" ? "Buyers now see a Verified badge on your listings." : (set["verification.note"] || "Please send a clearer photo of your document.")),
+      });
+    }
     return res.status(200).json({ success: true });
   } catch (error) { console.error("decideVerification error:", error); return fail(res, 500, "Failed."); }
 }
@@ -279,4 +384,4 @@ async function removePaymentQr(req, res) {
   return res.status(200).json({ success: true });
 }
 
-module.exports = { decodeImage, blockedEither, addOrderPhoto, listOrderPhotos, viewPhoto, openDispute, myDisputes, disputeMessage, adminDisputes, resolveDispute, reportUser, adminReports, setReportStatus, blockUser, unblockUser, myBlocks, sendFeedback, adminFeedback, setFeedbackStatus, submitVerification, adminVerifications, decideVerification, getPayment, setPayment, setPaymentQr, removePaymentQr };
+module.exports = { decodeImage, blockedEither, addOrderPhoto, listOrderPhotos, viewPhoto, openDispute, myDisputes, disputeMessage, adminDisputes, resolveDispute, reportUser, adminReports, setReportStatus, blockUser, unblockUser, myBlocks, sendFeedback, adminFeedback, setFeedbackStatus, submitVerification, submitDriverVerification, getDriverVerificationStatus, adminVerifications, decideVerification, getPayment, setPayment, setPaymentQr, removePaymentQr };

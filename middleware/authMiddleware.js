@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const User = require("../models/User");
 
 /**
  * Verifies the Authorization: Bearer <token> header and attaches
@@ -36,4 +37,33 @@ function requireRole(...allowedRoles) {
   };
 }
 
-module.exports = { protect, requireRole };
+/**
+ * Server-side enforcement for "an unapproved driver can't actually use
+ * the account" — this is the real gate, not just the app's UI politely
+ * hiding buttons. Apply it after requireRole("driver") on any action
+ * that matters: registering/updating a lorry, going on duty, accepting
+ * cargo. Admin can still do admin things regardless (not relevant here
+ * since this only guards driver-role routes, but kept symmetric with the
+ * rest of the codebase's style).
+ */
+async function requireVerifiedDriver(req, res, next) {
+  try {
+    const user = await User.findById(req.userId).select("verification");
+    if (!user || user.verification?.status !== "verified") {
+      const status = user?.verification?.status || "pending";
+      return res.status(403).json({
+        success: false,
+        code: "driver_not_verified",
+        verificationStatus: status,
+        message: status === "rejected"
+          ? "Your driver application wasn't approved, so this isn't available yet."
+          : "This isn't available until an admin approves your driver documents.",
+      });
+    }
+    next();
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Could not check your driver approval status." });
+  }
+}
+
+module.exports = { protect, requireRole, requireVerifiedDriver };

@@ -2,13 +2,15 @@ const express = require("express");
 const router = express.Router();
 const { limiter, loginGuard: makeLoginGuard } = require("../middleware/rateLimit");
 const loginGuard = makeLoginGuard({ max: parseInt(process.env.LOGIN_MAX_FAILS || "8", 10) });
-const { register, login, getCurrentUser, forgotPassword, resetPassword } = require("../controllers/authController");
+const { register, registerStart, registerVerify, login, getCurrentUser, forgotPassword, resetPassword } = require("../controllers/authController");
 const profile = require("../controllers/profileController");
 const account = require("../controllers/accountController");
 const safety = require("../controllers/safetyController");
 const { protect } = require("../middleware/authMiddleware");
 
-router.post("/register", register);
+router.post("/register", register); // kept for any older client; new clients use the two-step flow below
+router.post("/register-start", limiter({ windowMs: 60 * 60 * 1000, max: parseInt(process.env.RATE_LIMIT_FORGOT || "10", 10), message: "Too many registration attempts. Please try again in an hour." }), registerStart);
+router.post("/register-verify", registerVerify);
 router.post("/login", loginGuard.check, login);
 router.get("/me", protect, getCurrentUser);
 router.patch("/me", protect, profile.updateMe);
@@ -21,6 +23,8 @@ router.get("/export", protect, account.exportData);
 router.post("/delete-account", protect, account.deleteAccount);
 router.get("/referrals", protect, account.referrals);
 router.post("/verification", protect, safety.submitVerification);
+router.post("/verification/driver", protect, safety.submitDriverVerification);
+router.get("/verification/driver/status", protect, safety.getDriverVerificationStatus);
 router.get("/me/payment", protect, safety.getPayment);
 router.put("/me/payment", protect, safety.setPayment);
 router.put("/me/payment/qr", protect, safety.setPaymentQr);

@@ -1,7 +1,8 @@
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const User = require("../models/User");
-const { sendPasswordResetOtp } = require("../utils/emailService");
+const PendingRegistration = require("../models/PendingRegistration");
+const { sendPasswordResetOtp, sendRegistrationOtp } = require("../utils/emailService");
 const { ensureReferralCode } = require("./accountController");
 
 const ALLOWED_ROLES = ["farmer", "driver", "buyer", "admin"];
@@ -152,6 +153,192 @@ async function register(req, res) {
 }
 
 /**
+ * POST /api/auth/register-start
+ * Step 1 of signup for every role. Validates everything exactly like the
+ * old one-step `register` did, but instead of creating the account it
+ * stashes the details in PendingRegistration and emails a 6-digit code.
+ * No User document — not even a disabled one — exists until that code is
+ * confirmed with register-verify, so a fake/typo'd email can never
+ * produce an account on this server (the anti-fake-account requirement).
+ *
+ * Calling this again for the same email (e.g. "I didn't get the code")
+ * overwrites the previous pending attempt and sends a fresh code, subject
+ * to the same 60-second cooldown forgotPassword uses.
+ */
+async function registerStart(req, res) {
+  try {
+    const { fullName, email, phone, password, role, adminCode, farmerProfile, buyerProfile, driverProfile } = req.body;
+
+    if (!fullName || !email || !phone || !password || !role) {
+      return res.status(400).json({ success: false, message: "fullName, email, phone, password, and role are required." });
+    }
+    if (typeof email !== "string" || !EMAIL_REGEX.test(email.trim())) {
+      return res.status(400).json({ success: false, message: "Please enter a valid email address." });
+    }
+    if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({ success: false, message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
+    }
+    if (!ALLOWED_ROLES.includes(role)) {
+      return res.status(400).json({ success: false, message: "Invalid role." });
+    }
+    if (role === "admin") {
+      const expectedCode = process.env.ADMIN_SIGNUP_CODE;
+      if (!expectedCode) return res.status(403).json({ success: false, message: "Admin registration is disabled on this server." });
+      if (typeof adminCode !== "string" || !safeEqual(adminCode, expectedCode)) {
+        return res.status(403).json({ success: false, message: "Incorrect admin sign-up code." });
+      }
+    }
+    if (role === "driver") {
+      const d = driverProfile || {};
+      if (!d.vehicleRegistrationNo || !Number.isFinite(Number(d.vehicleCapacityKg)) || Number(d.vehicleCapacityKg) <= 0) {
+        return res.status(400).json({ success: false, message: "Vehicle registration number and capacity are required for a driver account." });
+      }
+      if (!d.vehicleLicenseExpiryDate || isNaN(new Date(d.vehicleLicenseExpiryDate).getTime())) {
+        return res.status(400).json({ success: false, message: "Vehicle license expiry date is required for a driver account." });
+      }
+      if (new Date(d.vehicleLicenseExpiryDate) < new Date()) {
+        return res.status(400).json({ success: false, message: "That vehicle license has already expired — please renew it before registering." });
+      }
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    if (await User.exists({ email: normalizedEmail })) {
+      return res.status(409).json({ success: false, message: "An account with this email already exists." });
+    }
+
+    const referrer = typeof req.body.referralCode === "string" && req.body.referralCode.trim() ? await User.findOne({ referralCode: req.body.referralCode.trim().toUpperCase() }).select("_id") : null;
+
+    const existingPending = await PendingRegistration.findOne({ email: normalizedEmail });
+    if (existingPending && Date.now() - existingPending.lastSentAt.getTime() < OTP_RESEND_COOLDOWN_SECONDS * 1000) {
+      return res.status(200).json({ success: true, message: "A code was already sent — check your email (or wait a moment to request another)." });
+    }
+
+    const passwordHash = await User.hashPassword(password);
+    const otpCode = crypto.randomInt(100000, 1000000).toString();
+    const now = Date.now();
+
+    await PendingRegistration.findOneAndUpdate(
+      { email: normalizedEmail },
+      {
+        email: normalizedEmail,
+        fullName: String(fullName).trim(),
+        phone: String(phone).trim(),
+        passwordHash,
+        role,
+        farmerProfile: role === "farmer" ? pickFarmerProfile(farmerProfile) : undefined,
+        buyerProfile: role === "buyer" ? pickBuyerProfile(buyerProfile) : undefined,
+        driverProfile: role === "driver" ? { ...pickDriverProfile(driverProfile), vehicleLicenseExpiryDate: new Date(driverProfile.vehicleLicenseExpiryDate) } : undefined,
+        ...(referrer ? { referredBy: referrer._id } : {}),
+        otpHash: sha256(otpCode),
+        otpExpires: new Date(now + OTP_EXPIRY_MINUTES * 60 * 1000),
+        attempts: 0,
+        lastSentAt: new Date(now),
+        expiresAt: new Date(now + 60 * 60 * 1000), // auto-deleted after 1 hour either way
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const emailSent = await sendRegistrationOtp(normalizedEmail, otpCode);
+    if (!emailSent) {
+      console.log(`[DEV FALLBACK] Registration OTP for ${normalizedEmail}: ${otpCode}`);
+    }
+
+    return res.status(200).json({ success: true, message: "We've emailed you a 6-digit code to confirm your account." });
+  } catch (error) {
+    if (error && error.code === 11000) {
+      return res.status(409).json({ success: false, message: "An account with this email already exists." });
+    }
+    console.error("registerStart error:", error);
+    return res.status(500).json({ success: false, message: "Registration failed. Please try again." });
+  }
+}
+
+/**
+ * POST /api/auth/register-verify
+ * Body: { email, otp }
+ * Step 2: confirms the code and actually creates the User. Issues a token
+ * right away for every role (including a pending driver) so the client
+ * can immediately upload the mandatory profile photo — and, for a driver,
+ * the mandatory license/vehicle documents — using the normal authenticated
+ * endpoints. A driver's token works for that, but `login()` below refuses
+ * a FUTURE login until an admin approves the account; see also
+ * requireVerifiedDriver in authMiddleware.js, which blocks the driver
+ * actions that matter (going on duty, accepting cargo) even within this
+ * first session, before the documents are submitted.
+ */
+async function registerVerify(req, res) {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp || typeof email !== "string") {
+      return res.status(400).json({ success: false, message: "email and otp are required." });
+    }
+
+    const pending = await PendingRegistration.findOne({ email: email.toLowerCase().trim() });
+    if (!pending) {
+      return res.status(400).json({ success: false, message: "No pending registration found for this email. Please start again." });
+    }
+    if (pending.otpExpires < new Date()) {
+      await pending.deleteOne();
+      return res.status(400).json({ success: false, message: "This code has expired. Please start registration again." });
+    }
+    if (!safeEqual(sha256(otp), pending.otpHash)) {
+      pending.attempts = (pending.attempts || 0) + 1;
+      if (pending.attempts >= OTP_MAX_WRONG_ATTEMPTS) {
+        await pending.deleteOne();
+        return res.status(400).json({ success: false, message: "Too many incorrect attempts. Please start registration again." });
+      }
+      await pending.save();
+      return res.status(400).json({ success: false, message: `Incorrect code. ${OTP_MAX_WRONG_ATTEMPTS - pending.attempts} attempt(s) left.` });
+    }
+
+    // Someone else could have registered this exact email in the few
+    // minutes the code was outstanding — re-check right before creating.
+    if (await User.exists({ email: pending.email })) {
+      await pending.deleteOne();
+      return res.status(409).json({ success: false, message: "An account with this email already exists." });
+    }
+
+    const user = await User.create({
+      fullName: pending.fullName,
+      email: pending.email,
+      phone: pending.phone,
+      passwordHash: pending.passwordHash,
+      role: pending.role,
+      ...(pending.referredBy ? { referredBy: pending.referredBy } : {}),
+      farmerProfile: pending.farmerProfile,
+      buyerProfile: pending.buyerProfile,
+      driverProfile: pending.driverProfile,
+      // A driver's account starts "pending" — they can finish onboarding
+      // (profile photo + documents) in this same session, but can't log
+      // back in until an admin approves it. Every other role is usable
+      // right away; OTP already proved they own that email.
+      verification: pending.role === "driver" ? { status: "pending", submittedAt: new Date() } : { status: "verified" },
+    });
+    await pending.deleteOne();
+
+    await ensureReferralCode(user);
+    const token = generateToken(user._id, user.role);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        token,
+        user: {
+          id: user._id,
+          fullName: user.fullName,
+          email: user.email,
+          role: user.role,
+          verificationStatus: user.verification.status,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("registerVerify error:", error);
+    return res.status(500).json({ success: false, message: "Could not confirm your account. Please try again." });
+  }
+}
+
+/**
  * POST /api/auth/login
  */
 async function login(req, res) {
@@ -176,6 +363,14 @@ async function login(req, res) {
       return res.status(403).json({ success: false, message: "This account has been deactivated." });
     }
 
+    // A driver always gets a token — a pending/rejected driver still needs one
+    // to check their approval status and to submit or resubmit documents. What
+    // actually blocks a non-verified driver from USING the account is the
+    // requireVerifiedDriver middleware on the sensitive driver routes (lorry
+    // registration, location updates, accepting cargo, posting return trips),
+    // not login itself. The client uses `verification.status` below to route
+    // a non-verified driver to a "pending approval" screen instead of the
+    // normal driver home screen.
     const token = generateToken(user._id, user.role);
 
     return res.status(200).json({
@@ -188,6 +383,7 @@ async function login(req, res) {
           email: user.email,
           role: user.role,
           farmerProfile: user.farmerProfile,
+          ...(user.role === "driver" ? { verification: { status: user.verification?.status || "pending", note: user.verification?.note || "" } } : {}),
         },
       },
     });
@@ -341,4 +537,4 @@ async function resetPassword(req, res) {
   }
 }
 
-module.exports = { register, login, getCurrentUser, forgotPassword, resetPassword };
+module.exports = { register, registerStart, registerVerify, login, getCurrentUser, forgotPassword, resetPassword };

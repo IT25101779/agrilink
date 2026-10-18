@@ -38,6 +38,10 @@ const UserSchema = new mongoose.Schema(
       vehicleRegistrationNo: { type: String },
       vehicleCapacityKg: { type: Number },
       isOnDuty: { type: Boolean, default: false },
+      // Must be renewed yearly in real life — the admin approvals page
+      // flags this if it's expired or expiring soon so a driver doesn't
+      // keep working on a lapsed license unnoticed.
+      vehicleLicenseExpiryDate: { type: Date },
     },
     // Buyer-specific profile
     buyerProfile: {
@@ -70,7 +74,7 @@ const UserSchema = new mongoose.Schema(
     // ID / business check. The document photo is deleted as soon as the admin decides.
     verification: {
       status: { type: String, enum: ["none", "pending", "verified", "rejected"], default: "none" },
-      docType: { type: String, enum: ["nic", "business_reg", "farmer_card", ""], default: "" },
+      docType: { type: String, enum: ["nic", "business_reg", "farmer_card", "driver_docs", ""], default: "" },
       submittedAt: { type: Date },
       decidedAt: { type: Date },
       note: { type: String, default: "" },

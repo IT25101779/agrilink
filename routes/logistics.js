@@ -1,5 +1,5 @@
 const express = require("express");
-const { protect, requireRole } = require("../middleware/authMiddleware");
+const { protect, requireRole, requireVerifiedDriver } = require("../middleware/authMiddleware");
 const { bindIdentity, ownerOf } = require("../middleware/identity");
 const LorryFleetTracking = require("../models/LorryFleetTracking");
 const router = express.Router();
@@ -41,13 +41,16 @@ router.get("/pricing", getPricingConfig);
 router.patch("/pricing", requireRole("admin"), updatePricingConfig);
 router.get("/rent-quote", getRentQuote);
 
-router.post("/lorries", requireRole("driver"), upsertLorryStatus);
+// requireVerifiedDriver below is the real enforcement of "can't use the
+// account until admin-approved" — a pending/rejected driver's token works
+// for login and document upload, but every one of these is refused.
+router.post("/lorries", requireRole("driver"), requireVerifiedDriver, upsertLorryStatus);
 router.get("/lorries/nearby", getNearbyLorries);
 router.get("/lorries/mine", getMyLorry);
 router.get("/lorries/my-bookings", requireRole("farmer"), getMyCargoBookings);
-router.patch("/lorries/:id/location", ownerOf(LorryFleetTracking, "driver"), updateLocation);
-router.patch("/lorries/:id/toggle-tracking", ownerOf(LorryFleetTracking, "driver"), toggleTracking);
-router.patch("/lorries/:id/accepting-cargo", ownerOf(LorryFleetTracking, "driver"), toggleAcceptingCargo);
+router.patch("/lorries/:id/location", ownerOf(LorryFleetTracking, "driver"), requireVerifiedDriver, updateLocation);
+router.patch("/lorries/:id/toggle-tracking", ownerOf(LorryFleetTracking, "driver"), requireVerifiedDriver, toggleTracking);
+router.patch("/lorries/:id/accepting-cargo", ownerOf(LorryFleetTracking, "driver"), requireVerifiedDriver, toggleAcceptingCargo);
 router.post("/lorries/:id/cargo-request", requireRole("farmer"), requestCargo);
 router.patch("/lorries/:id/cargo/:bookingId", lorryParty, updateCargoBooking);
 
