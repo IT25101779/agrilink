@@ -257,21 +257,30 @@ async function getNearbyLorries(req, res) {
     }
 
     const radiusMeters = radiusKm ? Number(radiusKm) * 1000 : 25000;
+    const geometry = { type: "Point", coordinates: [Number(longitude), Number(latitude)] };
 
-    const filter = {
+    const baseFilter = {
       isTrackingActive: true,
       acceptingCargo: true, // a driver who marked their lorry "full" stops showing up for new requests
       remainingCapacityKg: { $gt: 0 },
-      currentLocation: {
-        $near: {
-          $geometry: { type: "Point", coordinates: [Number(longitude), Number(latitude)] },
-          $maxDistance: radiusMeters,
-        },
-      },
     };
-    if (destinationHub) filter.destinationHub = destinationHub;
+    if (destinationHub) baseFilter.destinationHub = destinationHub;
 
-    const lorries = await LorryFleetTracking.find(filter).populate("driver", "fullName phone");
+    let lorries = await LorryFleetTracking.find({
+      ...baseFilter,
+      currentLocation: { $near: { $geometry: geometry, $maxDistance: radiusMeters } },
+    }).populate("driver", "fullName phone");
+
+    // Nothing within the radius (common when a device's GPS — especially an
+    // emulator's, or a real phone far from the seeded demo lorries — isn't
+    // actually near any of them): fall back to the closest lorries anywhere
+    // rather than showing an empty list.
+    if (lorries.length === 0) {
+      lorries = await LorryFleetTracking.find({
+        ...baseFilter,
+        currentLocation: { $near: { $geometry: geometry } },
+      }).populate("driver", "fullName phone");
+    }
 
     return res.status(200).json({ success: true, count: lorries.length, data: lorries });
   } catch (error) {

@@ -83,9 +83,17 @@ const LocalSupplier = require("../models/LocalSupplier");
 const LogisticsPricingConfig = require("../models/LogisticsPricingConfig");
 const ForwardContract = require("../models/ForwardContract");
 const DataPartner = require("../models/DataPartner");
+const CommunityListing = require("../models/CommunityListing");
 const DRIVER_EMAIL = "demo.driver@agrilink.lk";
 const DRIVER2_EMAIL = "demo.driver2@agrilink.lk";
 const DRIVER3_EMAIL = "demo.driver3@agrilink.lk";
+const DRIVER4_EMAIL = "demo.driver4@agrilink.lk";
+const DRIVER5_EMAIL = "demo.driver5@agrilink.lk";
+// A driver account whose docs are already approved, same as a real admin
+// would set after reviewing uploaded documents. Without this, every demo
+// driver defaults to verification.status "none" and gets blocked by the
+// driver-approval gate added later — breaking every demo lorry.
+const VERIFIED_DRIVER_DOCS = { status: "verified", docType: "driver_docs", submittedAt: new Date(), decidedAt: new Date() };
 const BUYER3_EMAIL = "demo.buyer3@agrilink.lk";
 const BUYER4_EMAIL = "demo.buyer4@agrilink.lk";
 const DEMO_AD_BRANDS = ["Lanka Fuel Card", "Ceylon Tyre Mart", "AgroSure Crop Insurance", "Kandy Cold Store", "GreenGrow Seeds"];
@@ -173,6 +181,7 @@ async function main() {
     await DemandRequest.deleteMany({ buyer: { $in: previousIds } }); // also covers buyer3/buyer4
     await CrowdfundingCampaign.deleteMany({ "pledges.investor": { $in: previousIds } });
     await ForwardContract.deleteMany({ buyer: { $in: previousIds } });
+    await CommunityListing.deleteMany({ farmer: { $in: previousIds } });
     await User.deleteMany({ _id: { $in: previousIds } });
     console.log("Removed previous demo data.");
   }
@@ -622,7 +631,7 @@ async function main() {
   await mkPaid(trustFarmers[2], buyer2, "Carrot", 60, 240, 5, ["honest_weight"], 0);
 
   // A demo truck driver with three return trips that are already posted
-  const driver = await User.create({ fullName: "Kumara Perera (Demo Driver)", email: DRIVER_EMAIL, phone: "+94771230000", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LB-4821", vehicleCapacityKg: 3000 } });
+  const driver = await User.create({ fullName: "Kumara Perera (Demo Driver)", email: DRIVER_EMAIL, phone: "+94771230000", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LB-4821", vehicleCapacityKg: 3000 }, verification: VERIFIED_DRIVER_DOCS });
   await ReturnTrip.create([
     { driver: driver._id, vehicleRegistrationNo: "WP LB-4821", fromHub: "Colombo_Manning_Market", toDistrict: "Kandy", departAt: new Date(Date.now() + 18 * 3600000), availableKg: 900, pricePerKg: 11, regularPricePerKg: 20, note: "Empty after a Manning Market delivery — can pick up along the A1." },
     { driver: driver._id, vehicleRegistrationNo: "WP LB-4821", fromHub: "Dambulla", toDistrict: "Nuwara Eliya", departAt: new Date(Date.now() + 40 * 3600000), availableKg: 700, pricePerKg: 14, regularPricePerKg: 24 },
@@ -683,7 +692,6 @@ async function main() {
   console.log(`  Demo partner API key 1 (Ceylon Fertilizer Co.): ${partner1.apiKey}`);
   console.log(`  Demo partner API key 2 (AgroSure Crop Insurance): ${partner2.apiKey}`);
   console.log(`  Try it: curl -H "X-Api-Key: ${partner1.apiKey}" ${process.env.API_BASE_URL || "<your-api-url>"}/api/partner-insights/price-trends`);
-  await SupportPrice.deleteMany({ source: "Sample - replace with the official notice" });
   await YieldRecord.insertMany([{ farmer: farmer._id, cropType: "Tomato", season: "maha", year: new Date().getFullYear() - 1, acres: 2, harvestKg: 9000, district: "Kandy" }, { farmer: farmer._id, cropType: "Carrot", season: "yala", year: new Date().getFullYear() - 1, acres: 1, harvestKg: 6500, district: "Kandy" }]);
   console.log("Created demo ads, prices, surveys, trust history, return trips and a farm ledger.");
 
@@ -731,8 +739,13 @@ async function main() {
   // 12c. A demo lorry fleet (3 drivers, each with a lorry and a mix of
   // pending/confirmed/full cargo bookings) so the Logistics tab is never
   // empty, plus the user's requested "mark lorry as full" state.
-  const driver2 = await User.create({ fullName: "Sampath Kumara (Demo Driver 2)", email: DRIVER2_EMAIL, phone: "+94771230001", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LC-7732", vehicleCapacityKg: 5000 } });
-  const driver3 = await User.create({ fullName: "Ruwan Senadeera (Demo Driver 3)", email: DRIVER3_EMAIL, phone: "+94771230002", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "CP LA-3390", vehicleCapacityKg: 2500 } });
+  const driver2 = await User.create({ fullName: "Sampath Kumara (Demo Driver 2)", email: DRIVER2_EMAIL, phone: "+94771230001", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LC-7732", vehicleCapacityKg: 5000 }, verification: VERIFIED_DRIVER_DOCS });
+  const driver3 = await User.create({ fullName: "Ruwan Senadeera (Demo Driver 3)", email: DRIVER3_EMAIL, phone: "+94771230002", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "CP LA-3390", vehicleCapacityKg: 2500 }, verification: VERIFIED_DRIVER_DOCS });
+  // Two more drivers based near Kelaniya/Gampaha, for the live demo at the
+  // University of Kelaniya — so "nearby lorries" finds real nearby lorries
+  // there instead of relying only on the far-away fallback.
+  const driver4 = await User.create({ fullName: "Nalin Fernando (Demo Driver 4)", email: DRIVER4_EMAIL, phone: "+94771230003", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LD-9140", vehicleCapacityKg: 4000 }, verification: VERIFIED_DRIVER_DOCS });
+  const driver5 = await User.create({ fullName: "Chamara Dissanayake (Demo Driver 5)", email: DRIVER5_EMAIL, phone: "+94771230004", passwordHash, role: "driver", driverProfile: { vehicleRegistrationNo: "WP LE-2256", vehicleCapacityKg: 3500 }, verification: VERIFIED_DRIVER_DOCS });
 
   const kandyFeaturedShop = await MarketShop.findOne({ market: "Kandy", shopNumber: "166" });
   const pricing = await LogisticsPricingConfig.getOrCreate();
@@ -760,7 +773,26 @@ async function main() {
     currentLocation: { type: "Point", coordinates: [80.6337, 7.2906] }, // Kandy, just starting out
     destinationHub: "Dambulla", isTrackingActive: true, acceptingCargo: true, routeStatus: "idle", cargoBookings: [],
   });
-  console.log("Created a 3-lorry demo fleet (one mid-route, one marked full, one idle and ready for bookings).");
+  // Two more lorries, both heading to the SAME destination (Colombo Manning
+  // Market) but starting from two DIFFERENT points near Kelaniya/Gampaha —
+  // requested so the demo shows several trucks going the same way, and so
+  // a live demo at the University of Kelaniya finds real nearby lorries
+  // instead of only the Kandy/Dambulla ones above (which are 100km+ away).
+  const manningShop = await MarketShop.findOne({ market: "Colombo_Manning_Market", isFeatured: true }) || await MarketShop.findOne({ market: "Colombo_Manning_Market" });
+  await LorryFleetTracking.create({
+    driver: driver4._id, vehicleRegistrationNo: "WP LD-9140", totalCapacityKg: 4000, remainingCapacityKg: 2600,
+    currentLocation: { type: "Point", coordinates: [79.9217, 6.9553] }, // Kelaniya
+    destinationHub: "Colombo_Manning_Market", isTrackingActive: true, acceptingCargo: true, routeStatus: "idle",
+    cargoBookings: manningShop ? [
+      { farmer: n(2)._id, cropType: "Cabbage", weightKg: 400, shop: manningShop._id, calculatedRentLkr: LogisticsPricingConfig.calculateRent(pricing, 400), status: "requested" },
+    ] : [],
+  });
+  await LorryFleetTracking.create({
+    driver: driver5._id, vehicleRegistrationNo: "WP LE-2256", totalCapacityKg: 3500, remainingCapacityKg: 3500,
+    currentLocation: { type: "Point", coordinates: [80.0098, 7.0873] }, // Gampaha — different starting point, same destination
+    destinationHub: "Colombo_Manning_Market", isTrackingActive: true, acceptingCargo: true, routeStatus: "idle", cargoBookings: [],
+  });
+  console.log("Created a 5-lorry demo fleet (added 2 more to Colombo Manning Market from Kelaniya and Gampaha, for the Kelaniya live demo).");
 
   // ---- 13. Nearby suppliers & rentals (merged from the old standalone seedSuppliers.js
   // so ONE command seeds everything — this is why "renting items" wasn't showing data before) ----
@@ -768,6 +800,11 @@ async function main() {
     { businessName: "Kurunegala Agro Center", supplierType: "seed_store", location: { type: "Point", coordinates: [80.3647, 7.4863] }, address: "No. 45, Kandy Road, Kurunegala", district: "Kurunegala", contactPhone: "+94372223344", isVerified: true, itemsAvailable: ["tomato seeds", "chili seeds", "paddy seeds", "urea fertilizer", "compost"] },
     { businessName: "Dambulla Farmers Supply", supplierType: "fertilizer_store", location: { type: "Point", coordinates: [80.6517, 7.8675] }, address: "Anuradhapura Road, Dambulla", district: "Matale", contactPhone: "+94662284455", isVerified: true, itemsAvailable: ["urea", "TSP", "MOP", "organic compost", "pesticides"] },
     { businessName: "Kandy Garden Tools", supplierType: "tool_store", location: { type: "Point", coordinates: [80.6337, 7.2906] }, address: "Peradeniya Road, Kandy", district: "Kandy", contactPhone: "+94812234455", isVerified: true, itemsAvailable: ["sprayers", "hoes", "sickles", "irrigation pipes", "protective gloves"] },
+    // Every other "equipment_rental" supplier below is 65km+ from Kandy — outside
+    // the app's 50km search radius — so a Kandy-based demo farmer opening the
+    // Rentals tab saw nothing even though the feature "had data" in the database.
+    // This one is in Kandy itself so the tab is never empty for the main demo account.
+    { businessName: "Kandy Tractor & Equipment Rentals", supplierType: "equipment_rental", location: { type: "Point", coordinates: [80.6280, 7.2750] }, address: "Katugastota Road, Kandy", district: "Kandy", contactPhone: "+94812245566", isVerified: true, rentalEquipment: [{ equipmentName: "Two-wheel tractor", dailyRateLkr: 4300 }, { equipmentName: "Water pump", dailyRateLkr: 1500 }, { equipmentName: "Brush cutter", dailyRateLkr: 1300 }, { equipmentName: "Power tiller", dailyRateLkr: 3800 }] },
     { businessName: "Anuradhapura Tractor Rentals", supplierType: "equipment_rental", location: { type: "Point", coordinates: [80.4037, 8.3114] }, address: "Maithreepala Mawatha, Anuradhapura", district: "Anuradhapura", contactPhone: "+94252235566", isVerified: true, rentalEquipment: [{ equipmentName: "Two-wheel tractor", dailyRateLkr: 4500 }, { equipmentName: "Four-wheel tractor", dailyRateLkr: 9000 }, { equipmentName: "Combine harvester", dailyRateLkr: 22000 }] },
     { businessName: "Galle Southern Machinery", supplierType: "equipment_rental", location: { type: "Point", coordinates: [80.2170, 6.0535] }, address: "Matara Road, Galle", district: "Galle", contactPhone: "+94912246677", isVerified: true, rentalEquipment: [{ equipmentName: "Two-wheel tractor", dailyRateLkr: 4000 }, { equipmentName: "Water pump", dailyRateLkr: 1500 }, { equipmentName: "Brush cutter", dailyRateLkr: 1200 }] },
     { businessName: "Colombo Agri Mart", supplierType: "seed_store", location: { type: "Point", coordinates: [79.8612, 6.9271] }, address: "Baseline Road, Colombo 09", district: "Colombo", contactPhone: "+94112257788", isVerified: true, itemsAvailable: ["hybrid vegetable seeds", "greenhouse supplies", "drip irrigation kits"] },
@@ -775,6 +812,11 @@ async function main() {
     { businessName: "Jaffna Northern Agro Supplies", supplierType: "tool_store", location: { type: "Point", coordinates: [80.0255, 9.6615] }, address: "Hospital Road, Jaffna", district: "Jaffna", contactPhone: "+94212279900", isVerified: true, itemsAvailable: ["hand tools", "sprayers", "nets", "storage crates"] },
     { businessName: "Ratnapura Hill Country Rentals", supplierType: "equipment_rental", location: { type: "Point", coordinates: [80.4037, 6.6828] }, address: "Pelmadulla Road, Ratnapura", district: "Ratnapura", contactPhone: "+94452281122", isVerified: true, rentalEquipment: [{ equipmentName: "Mini tiller", dailyRateLkr: 3000 }, { equipmentName: "Two-wheel tractor", dailyRateLkr: 4200 }] },
     { businessName: "Badulla Upcountry Farm Store", supplierType: "seed_store", location: { type: "Point", coordinates: [81.0550, 6.9934] }, address: "Bandarawela Road, Badulla", district: "Badulla", contactPhone: "+94552292233", isVerified: true, itemsAvailable: ["vegetable seeds", "potato seed tubers", "fertilizer", "greenhouse film"] },
+    // Kelaniya-area suppliers, added for the live demo at the University of
+    // Kelaniya — so "Nearby Suppliers & Rentals" shows real nearby results
+    // there (not just Colombo Agri Mart ~12km away).
+    { businessName: "Kelaniya Agro Supplies", supplierType: "seed_store", location: { type: "Point", coordinates: [79.9217, 6.9553] }, address: "Kandy Road, Kelaniya", district: "Gampaha", contactPhone: "+94112911234", isVerified: true, itemsAvailable: ["vegetable seeds", "urea fertilizer", "compost", "pesticides"] },
+    { businessName: "Kelaniya Farm Equipment Rentals", supplierType: "equipment_rental", location: { type: "Point", coordinates: [79.9180, 6.9580] }, address: "Biyagama Road, Kelaniya", district: "Gampaha", contactPhone: "+94112911235", isVerified: true, rentalEquipment: [{ equipmentName: "Two-wheel tractor", dailyRateLkr: 4200 }, { equipmentName: "Water pump", dailyRateLkr: 1400 }, { equipmentName: "Brush cutter", dailyRateLkr: 1250 }] },
   ];
   let suppliersCreated = 0;
   for (const supplier of sampleSuppliers) {
@@ -782,6 +824,105 @@ async function main() {
     if (!exists) { await LocalSupplier.create(supplier); suppliersCreated++; }
   }
   console.log(`Created ${suppliersCreated} new local supplier(s) for Nearby Suppliers & Rentals (skipped any that already existed).`);
+
+  // ---- 16. Community Marketplace (farmer-to-farmer equipment rentals & seeds) ----
+  // This is a DIFFERENT feature from "Nearby Suppliers & Rentals" above (that's
+  // admin-managed businesses) — this is what a farmer posts themselves ("I have
+  // a tiller for rent", "extra tomato seeds to sell"). It had ZERO demo rows
+  // before this update, so the Community Marketplace tab was always empty no
+  // matter where you tested from.
+  await CommunityListing.insertMany([
+    {
+      farmer: farmer._id, listingType: "equipment_rental", title: "Two-wheel tractor for rent",
+      description: "Well-maintained Kubota, available weekends and after harvest season. Comes with a trailer attachment.",
+      priceInfo: { amount: 4000, unit: "per day" }, location: { type: "Point", coordinates: [80.6337, 7.2906] },
+      district: "Kandy", contactPhone: farmer.phone,
+    },
+    {
+      farmer: n(1)._id, listingType: "seeds_for_sale", title: "Extra Tomato seedlings (Thilina variety)",
+      description: "Healthy 3-week-old tomato seedlings, more than I need for my own plot. Sold in trays of 50.",
+      priceInfo: { amount: 350, unit: "per tray of 50" }, location: { type: "Point", coordinates: [80.6280, 7.2750] },
+      district: "Kandy", contactPhone: n(1).phone,
+    },
+    {
+      farmer: n(4)._id, listingType: "equipment_rental", title: "Knapsack sprayer (16L) for rent",
+      description: "Petrol-powered knapsack sprayer, good for pesticide/fertilizer spraying on up to 2 acres a day.",
+      priceInfo: { amount: 800, unit: "per day" }, location: { type: "Point", coordinates: [80.6400, 7.3000] },
+      district: "Kandy", contactPhone: n(4).phone,
+    },
+    {
+      farmer: n(7)._id, listingType: "other", title: "Wooden harvest crates (20 available)",
+      description: "Sturdy wooden crates, good for transporting vegetables to market without bruising. Selling as I'm upgrading to plastic ones.",
+      priceInfo: { amount: 250, unit: "per crate" }, location: { type: "Point", coordinates: [80.6450, 7.2850] },
+      district: "Kandy", contactPhone: n(7).phone,
+    },
+    {
+      farmer: n(9)._id, listingType: "seeds_for_sale", title: "Carrot seeds (New Kuroda) — bulk",
+      description: "Bought in bulk for my own 1-acre plot, have extra to share with nearby farmers at cost.",
+      priceInfo: { amount: 180, unit: "per 100g packet" }, location: { type: "Point", coordinates: [80.6190, 7.4697] },
+      district: "Matale", contactPhone: n(9).phone,
+    },
+    {
+      farmer: n(11)._id, listingType: "equipment_rental", title: "Mini power tiller for rent",
+      description: "Good for small vegetable plots, easy to operate. Available most days — just call ahead.",
+      priceInfo: { amount: 3200, unit: "per day" }, location: { type: "Point", coordinates: [80.7698, 6.9497] },
+      district: "Nuwara Eliya", contactPhone: n(11).phone,
+    },
+    // Kelaniya-area listings, added for the live demo at the University of
+    // Kelaniya, so Community Marketplace also shows real nearby results there.
+    {
+      farmer: n(2)._id, listingType: "equipment_rental", title: "Water pump for rent (Kelaniya area)",
+      description: "Diesel water pump, good for irrigation on small plots near Kelaniya/Biyagama. Available weekdays.",
+      priceInfo: { amount: 1200, unit: "per day" }, location: { type: "Point", coordinates: [79.9217, 6.9553] },
+      district: "Gampaha", contactPhone: n(2).phone,
+    },
+    {
+      farmer: n(5)._id, listingType: "seeds_for_sale", title: "Chilli seedlings — extra trays (Kelaniya)",
+      description: "Healthy chilli seedlings, more than needed for my own plot near Kelaniya. Sold in trays of 50.",
+      priceInfo: { amount: 380, unit: "per tray of 50" }, location: { type: "Point", coordinates: [79.9180, 6.9580] },
+      district: "Gampaha", contactPhone: n(5).phone,
+    },
+  ]);
+  console.log("Created 8 Community Marketplace listings (equipment rentals + seeds for sale) across Kandy, Matale, Nuwara Eliya and Kelaniya/Gampaha.");
+
+  // ---- 17. Official support prices (admin-published) — SAMPLE rows only.
+  // Same convention as the government officer contacts: clearly marked as a
+  // sample so nobody mistakes a made-up figure for a real official rate.
+  // Replace/add real ones from the admin site's Support Price tab before a
+  // real farmer relies on this for a selling decision. ----
+  await SupportPrice.deleteMany({ source: "Sample - replace with the official notice" });
+  await SupportPrice.insertMany([
+    { cropType: "Paddy", label: "Guaranteed price (Samba)", pricePerKg: 120, source: "Sample - replace with the official notice", effectiveFrom: daysAgo(10) },
+    { cropType: "Paddy", label: "Guaranteed price (Nadu)", pricePerKg: 115, source: "Sample - replace with the official notice", effectiveFrom: daysAgo(10) },
+    { cropType: "Tea (Green leaf)", label: "Minimum price notice", pricePerKg: 90, source: "Sample - replace with the official notice", effectiveFrom: daysAgo(5) },
+  ]);
+  console.log("Created 3 SAMPLE support prices (Paddy/Tea) — replace with real official figures from the admin site.");
+
+  // ---- 18. Demo farmer's subsidy history (feeds the Records tab's subsidy list) ----
+  await SubsidyRecord.insertMany([
+    { farmer: farmer._id, kind: "fertilizer", item: "Urea (50kg bags)", quantity: 4, unit: "bags", valueLkr: 8000, receivedOn: daysAgo(70), nextDueOn: daysFromNow(40), note: "Seasonal fertilizer subsidy, Maha season." },
+    { farmer: farmer._id, kind: "seed", item: "Hybrid tomato seeds", quantity: 2, unit: "packets", valueLkr: 1200, receivedOn: daysAgo(95), note: "Agrarian Services Center, Kandy." },
+  ]);
+  console.log("Created 2 subsidy records for the demo farmer (Records tab).");
+
+  // ---- 19. One active wildlife sighting near Kandy (Wildlife Radar never empty) ----
+  await WildlifeSighting.deleteMany({ reporter: { $in: [n(2)._id] }, species: "wild_boar" });
+  await WildlifeSighting.create({
+    reporter: n(2)._id, species: "wild_boar",
+    location: { type: "Point", coordinates: [80.6300, 7.2950] }, district: "Kandy",
+    note: "Seen near the paddy edge around dusk, moving toward the vegetable plots.",
+    expiresAt: new Date(Date.now() + 36 * 60 * 60 * 1000), // still active for the demo (48h window)
+  });
+  console.log("Created 1 active wildlife sighting near Kandy (expires in 36h).");
+
+  // ---- 20. One demo damage report for the farmer (Records / Damage tab) ----
+  await DamageReport.deleteMany({ farmer: farmer._id });
+  await DamageReport.create({
+    farmer: farmer._id, cropType: "Tomato", cause: "heavy_rain", acresAffected: 0.5,
+    estimatedLossLkr: 15000, happenedOn: daysAgo(12),
+    description: "Unexpected heavy rain flattened part of the tomato plot before staking was finished.",
+  });
+  console.log("Created 1 demo damage report for the farmer.");
 
   console.log("\nDONE. Demo logins:");
   console.log(`  Farmer : ${FARMER_EMAIL} / ${DEMO_PASSWORD}`);
