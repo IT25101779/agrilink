@@ -28,7 +28,12 @@ function median(values) {
 /** GET /api/prices/board?market= — the latest official price per crop and market, with the change since the previous day. */
 async function board(req, res) {
   try {
-    const filter = { verified: true, day: { $gte: daysAgoKey(14) } };
+    // No day cutoff here on purpose: this always shows the latest verified
+    // price per crop/market, however old it is, rather than going empty
+    // if nobody has logged a fresh price in the last N days (which made the
+    // whole board disappear for EVERY account, demo or real, once seeded
+    // demo prices aged past the old 14-day window).
+    const filter = { verified: true };
     if (req.query.market && MARKETS.includes(req.query.market)) filter.market = req.query.market;
     const rows = await MarketPrice.find(filter).sort({ day: -1 }).lean();
     const groups = new Map();
@@ -37,7 +42,7 @@ async function board(req, res) {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(r);
     }
-    const community = await MarketPrice.find({ verified: false, day: { $gte: daysAgoKey(2) } }).lean();
+    const community = await MarketPrice.find({ verified: false, day: { $gte: daysAgoKey(30) } }).lean();
     const data = [];
     for (const [key, list] of groups) {
       const latest = list[0], previous = list.find((r) => r.day < latest.day);

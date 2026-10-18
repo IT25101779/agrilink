@@ -14,17 +14,25 @@ async function getNearbySuppliers(req, res) {
     }
 
     const radiusMeters = radiusKm ? Number(radiusKm) * 1000 : 25000;
-    const filter = {
-      location: {
-        $near: {
-          $geometry: { type: "Point", coordinates: [Number(longitude), Number(latitude)] },
-          $maxDistance: radiusMeters,
-        },
-      },
-    };
-    if (type) filter.supplierType = type;
+    const geometry = { type: "Point", coordinates: [Number(longitude), Number(latitude)] };
+    const typeFilter = type ? { supplierType: type } : {};
 
-    const suppliers = await LocalSupplier.find(filter).limit(30);
+    let suppliers = await LocalSupplier.find({
+      ...typeFilter,
+      location: { $near: { $geometry: geometry, $maxDistance: radiusMeters } },
+    }).limit(30);
+
+    // Nothing within the radius (common when a device's GPS — especially an
+    // emulator's — isn't actually near any seeded supplier): fall back to
+    // the closest suppliers anywhere, rather than showing an empty list.
+    // $near without $maxDistance still sorts by distance, it just doesn't cap it.
+    if (suppliers.length === 0) {
+      suppliers = await LocalSupplier.find({
+        ...typeFilter,
+        location: { $near: { $geometry: geometry } },
+      }).limit(30);
+    }
+
     return res.status(200).json({ success: true, count: suppliers.length, data: suppliers });
   } catch (error) {
     console.error("getNearbySuppliers error:", error);

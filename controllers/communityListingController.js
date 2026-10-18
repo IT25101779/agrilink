@@ -65,18 +65,26 @@ async function getNearbyListings(req, res) {
     }
 
     const radiusMeters = radiusKm ? Number(radiusKm) * 1000 : 25000;
-    const filter = {
-      isActive: true,
-      location: {
-        $near: {
-          $geometry: { type: "Point", coordinates: [Number(longitude), Number(latitude)] },
-          $maxDistance: radiusMeters,
-        },
-      },
-    };
-    if (listingType) filter.listingType = listingType;
+    const geometry = { type: "Point", coordinates: [Number(longitude), Number(latitude)] };
+    const typeFilter = listingType ? { listingType } : {};
 
-    const listings = await CommunityListing.find(filter).populate("farmer", "fullName").limit(50);
+    let listings = await CommunityListing.find({
+      isActive: true,
+      ...typeFilter,
+      location: { $near: { $geometry: geometry, $maxDistance: radiusMeters } },
+    }).populate("farmer", "fullName").limit(50);
+
+    // Nothing within the radius (common when a device's GPS — especially an
+    // emulator's — isn't actually near any seeded listing): fall back to the
+    // closest listings anywhere rather than showing an empty list.
+    if (listings.length === 0) {
+      listings = await CommunityListing.find({
+        isActive: true,
+        ...typeFilter,
+        location: { $near: { $geometry: geometry } },
+      }).populate("farmer", "fullName").limit(50);
+    }
+
     return res.status(200).json({ success: true, count: listings.length, data: listings });
   } catch (error) {
     console.error("getNearbyListings error:", error);
